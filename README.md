@@ -1,6 +1,6 @@
-# Claude Code CLI Podman 沙箱示例
+# Windows 环境下 Claude Code CLI 沙箱示例
 
-在 Podman 容器中运行 Claude Code CLI 的沙箱隔离示例，支持 Claude Code for VS Code 扩展集成。
+在 Podman 容器中运行 Claude Code CLI 的沙箱隔离示例，支持 Claude Code for VS Code 扩展集成。 
 
 ## 项目结构
 
@@ -20,14 +20,14 @@ demo/           # 可执行程序
 1. **配置认证**（在仓库根目录创建 `.env`）：
 
 ```bash
-ANTHROPIC_API_KEY=your-key      # 或 ANTHROPIC_AUTH_TOKEN
-ANTHROPIC_BASE_URL=             # 可选：自定义网关
-ANTHROPIC_MODEL=                # 可选：模型 ID
+ANTHROPIC_AUTH_TOKEN=your-key      # 或 ANTHROPIC_AUTH_TOKEN
+ANTHROPIC_BASE_URL=your-api-base-url
+ANTHROPIC_MODEL=your-model-name
 ```
 
 2. **在 VS Code 中打开容器**：执行 "Dev Containers: Reopen in Container"
 
-3. **使用 Claude Code**：容器启动后自动配置沙箱，直接使用 VS Code 扩展即可
+3. **使用 Claude Code**：容器启动后自动配置沙箱，直接使用 Claude Code for VS Code 扩展即可
 
 ## 沙箱架构
 
