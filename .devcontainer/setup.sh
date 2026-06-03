@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(dirname "$SCRIPT_DIR")}"
 ENV_FILE="$WORKSPACE_ROOT/.env"
 
 # Load workspace credentials automatically when shell env is empty.
@@ -27,6 +27,12 @@ fi
 echo "Testing bwrap..."
 if command -v bwrap >/dev/null 2>&1; then
     bwrap --version
+    # Test if bwrap can actually create namespaces
+    if bwrap --die-with-parent --bind / / --true 2>/dev/null; then
+        echo "bwrap namespace test: OK"
+    else
+        echo "bwrap namespace test: FAILED (may need CAP_SYS_ADMIN)"
+    fi
 else
     echo "bwrap not available"
 fi
@@ -41,6 +47,23 @@ if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
     echo "Gateway endpoint: ${ANTHROPIC_BASE_URL}"
 else
     echo "Gateway endpoint not set in container env (workspace .env may still provide it at runtime)"
+fi
+
+# ============================================
+# Workspace Permissions (for non-root user)
+# ============================================
+
+# Ensure workspace directory is writable by the devuser
+if [[ -d "$WORKSPACE_ROOT" ]]; then
+    # The container may have mounted the workspace with root ownership
+    # We need to ensure the devuser can write to it
+    echo "Ensuring workspace permissions for devuser..."
+    # Check if we have sudo or are root (during initial container setup)
+    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        sudo chown -R "$(id -u):$(id -g)" "$WORKSPACE_ROOT" 2>/dev/null || true
+    elif [[ "$(id -u)" == "0" ]]; then
+        chown -R devuser:devuser "$WORKSPACE_ROOT" 2>/dev/null || true
+    fi
 fi
 
 # ============================================
@@ -72,11 +95,23 @@ setup_sandbox_wrapper() {
     fi
 
     # Rename original binary and install wrapper
+    # This may require elevated permissions if installed in system path
     echo "Installing sandbox wrapper for claude..."
-    mv "$claude_path" "$claude_real"
-    cp "$wrapper_src" "$claude_path"
-    chmod +x "$claude_path"
-    echo "Sandbox wrapper installed: $claude_path -> claude-real"
+    if [[ "$(id -u)" == "0" ]] || command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        if [[ "$(id -u)" == "0" ]]; then
+            mv "$claude_path" "$claude_real"
+            cp "$wrapper_src" "$claude_path"
+            chmod +x "$claude_path"
+        else
+            sudo mv "$claude_path" "$claude_real"
+            sudo cp "$wrapper_src" "$claude_path"
+            sudo chmod +x "$claude_path"
+        fi
+        echo "Sandbox wrapper installed: $claude_path -> claude-real"
+    else
+        echo "Warning: Cannot install wrapper (need root/sudo access)"
+        echo "Claude will run without bubblewrap sandbox (settings.json sandbox still active)"
+    fi
 }
 
 setup_sandbox_wrapper

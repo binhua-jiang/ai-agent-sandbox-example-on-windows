@@ -4,7 +4,15 @@
 
 set -euo pipefail
 
-WORKSPACE_ROOT="/workspaces/sandbox"
+# Dynamically detect workspace root from script location or environment
+# Priority: 1. WORKSPACE_ROOT env var, 2. Script's parent directory's parent
+if [[ -n "${WORKSPACE_ROOT:-}" ]]; then
+    WORKSPACE_ROOT="$WORKSPACE_ROOT"
+else
+    # Script is at .devcontainer/claude-wrapper.sh, workspace is two levels up
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    WORKSPACE_ROOT="$(dirname "$SCRIPT_DIR")"
+fi
 ENV_FILE="$WORKSPACE_ROOT/.env"
 
 # Load workspace credentials if not already in env
@@ -36,6 +44,14 @@ if command -v bwrap >/dev/null 2>&1; then
 fi
 
 if [[ "$BWRAP_AVAILABLE" == "true" ]]; then
+    # Build bwrap arguments for .env.* files (glob expansion needed)
+    BWRAP_ENV_ARGS=()
+    for env_file in "$WORKSPACE_ROOT"/.env.*; do
+        if [[ -f "$env_file" ]]; then
+            BWRAP_ENV_ARGS+=(--ro-bind /dev/null "$env_file")
+        fi
+    done
+
     # Run with bubblewrap sandbox
     exec bwrap \
         --die-with-parent \
@@ -47,10 +63,16 @@ if [[ "$BWRAP_AVAILABLE" == "true" ]]; then
         --bind "$WORKSPACE_ROOT" "$WORKSPACE_ROOT" \
         --tmpfs "$WORKSPACE_ROOT/core/src" \
         --ro-bind /dev/null "$WORKSPACE_ROOT/.env" \
+        "${BWRAP_ENV_ARGS[@]}" \
         --chdir "$WORKSPACE_ROOT" \
         "$REAL_CLAUDE" "$@"
 else
     # Fallback: run without bwrap (container isolation only)
     # The .claude/settings.json still provides permission-based sandbox
+    echo "⚠️  WARNING: Bubblewrap sandbox unavailable, running with reduced isolation" >&2
+    echo "   Namespace isolation disabled. Only settings.json permissions are active." >&2
+    echo "   This may happen if container lacks CAP_SYS_ADMIN capability." >&2
+    # Log to a file for debugging (if writable)
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] bwrap unavailable, sandbox degraded" >> "$WORKSPACE_ROOT/.claude/sandbox.log" 2>/dev/null || true
     exec "$REAL_CLAUDE" "$@"
 fi

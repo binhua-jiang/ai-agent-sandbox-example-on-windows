@@ -134,8 +134,8 @@ Podman 是 Docker 的开源替代品，无需守护进程，支持 rootless 模�
 
 ```
 core/
-├── src/        # 源码（沙箱隔离）
-└── include/    # 头文件（可读）
+├── src/        # 源码（沙箱隔离：不可读写）
+└── include/    # 头文件（可读写）
 demo/           # 可执行程序
 .claude/
 └── settings.json    # Claude Code 沙箱配置（权限与隔离规则）
@@ -143,17 +143,19 @@ demo/           # 可执行程序
 ├── devcontainer.json    # 容器配置
 ├── setup.sh             # 容器创建时初始化（环境测试 + 沙箱包装器 + 插件安装）
 └── claude-wrapper.sh    # Claude CLI 沙箱包装器（自动安装）
+images/
+└── Dockerfile           # 容器镜像构建配置
 ```
 
 ## 快速开始
 
 1. **配置认证**（在仓库根目录创建 `.env`）：
 
-```bash
-ANTHROPIC_AUTH_TOKEN=your-key      # 或 ANTHROPIC_AUTH_TOKEN
-ANTHROPIC_BASE_URL=your-api-base-url
-ANTHROPIC_MODEL=your-model-name
-```
+   ```bash
+   ANTHROPIC_AUTH_TOKEN=your-key      # 或 ANTHROPIC_API_KEY
+   ANTHROPIC_BASE_URL=your-api-base-url  # 可选，用于代理/网关
+   ANTHROPIC_MODEL=your-model-name    # 可选，强制指定模型
+   ```
 
 2. **在 VS Code 中打开容器**：执行 "Dev Containers: Reopen in Container"
 
@@ -199,12 +201,17 @@ ANTHROPIC_MODEL=your-model-name
 
 ## 隔离策略
 
-| 路径 | 访问 |
-|------|------|
-| `core/src/**` | ❌ 不可见（tmpfs 空目录） |
-| `core/include/**` | ✅ 可读 |
-| `.env` | ❌ 不可读（绑定到 /dev/null） |
-| 其他文件 | ✅ 正常访问 |
+| 路径 | 读权限 | 写权限 | 隔离方式 |
+|------|--------|--------|----------|
+| `core/src/**` | ❌ 不可见 | ❌ 禁止 | tmpfs 空目录覆盖 + settings.json deny |
+| `core/include/**` | ✅ 可读 | ✅ 可写 | 正常挂载 |
+| `.env`, `.env.*` | ❌ 不可读 | ❌ 禁止 | /dev/null 绑定 + settings.json deny |
+| `.claude/settings.json` | ✅ 可读 | ❌ 禁止 | settings.json denyWrite |
+| `.git/config`, `.git/credentials` | ❌ 不可读 | ❌ 禁止 | settings.json deny |
+| `.ssh/**` | ❌ 不可读 | ❌ 禁止 | settings.json deny |
+| `**/*.pem`, `**/*.key`, `**/*.p12` | ❌ 不可读 | ❌ 禁止 | settings.json deny |
+| `.npmrc`, `.pypirc`, `.netrc` | ❌ 不可读 | ❌ 禁止 | settings.json deny |
+| 其他文件 | ✅ 正常访问 | ✅ 正常访问 | 正常挂载 |
 
 容器需要 `--cap-add=SYS_ADMIN` 以支持 bubblewrap 命名空间隔离。
 
@@ -214,3 +221,91 @@ ANTHROPIC_MODEL=your-model-name
 cmake -S . -B build && cmake --build build
 ./build/demo/demo
 ```
+
+## 错误排查
+
+### 常见问题与解决方案
+
+| 问题 | 可能原因 | 解决方案 |
+|------|----------|----------|
+| `bwrap: permission denied` | 容器缺少 SYS_ADMIN 能力 | 检查 `devcontainer.json` 的 `runArgs` 包含 `--cap-add=SYS_ADMIN` |
+| `bwrap: create namespace failed` | 内核不支持 user namespace | 确认使用 WSL2 + Docker/Podman，不是原生 Windows |
+| `claude: command not found` | CLI 未安装或 wrapper 配置失败 | 检查容器构建日志，确认 `npm install -g @anthropic-ai/claude-code` 成功 |
+| wrapper 未生效 | setup.sh 执行失败 | 检查 `postCreateCommand` 输出，确认 wrapper 安装成功 |
+| `.env` 仍可读取 | bwrap 回退到权限沙箱 | 检查 bwrap 是否可用，settings.json 应仍提供保护 |
+| SELinux 阻止访问 | Fedora/RHEL/CentOS SELinux 策略 | 确认 `--security-opt=label=disable` 已配置 |
+| 权限不足 (非 root 用户) | devuser 无法修改系统路径 | wrapper 安装需要 sudo/root，setup.sh 会尝试使用 sudo |
+
+### 诊断命令
+
+在容器内运行以下命令诊断问题：
+
+```bash
+# 检查 bwrap 是否可用
+bwrap --version
+bwrap --die-with-parent --bind / / --true && echo "bwrap OK" || echo "bwrap FAILED"
+
+# 检查 claude wrapper 是否安装
+which claude
+ls -la $(which claude)
+ls -la $(dirname $(which claude))/claude-real 2>/dev/null && echo "wrapper installed"
+
+# 检查环境变量
+echo "WORKSPACE_ROOT: ${WORKSPACE_ROOT:-not set}"
+echo "ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:+set}"
+
+# 测试隔离效果（应该失败或返回空）
+cat .env 2>/dev/null && echo "WARNING: .env readable!" || echo "OK: .env blocked"
+ls core/src/ 2>/dev/null && echo "WARNING: core/src visible!" || echo "OK: core/src blocked"
+```
+
+### 重置沙箱
+
+如果 wrapper 配置出现问题，可以手动重置：
+
+```bash
+# 恢复原始 claude 二进制
+sudo mv /usr/local/bin/claude-real /usr/local/bin/claude
+
+# 重新运行 setup
+bash .devcontainer/setup.sh
+```
+
+## 安全建议
+
+1. **定期更新 CLI 版本**：修改 `images/Dockerfile` 中的版本号
+2. **审计 settings.json**：根据项目需求调整隔离策略
+3. **保护 .env 文件**：确保 `.gitignore` 包含 `.env`
+4. **使用非 root 用户**：容器以 `devuser` 运行，减少风险
+
+### 关于 SYS_ADMIN 能力
+
+容器配置中的 `--cap-add=SYS_ADMIN` 是 **bubblewrap 沙箱必需的**，不是 Podman 必需的。
+
+```
+Windows → WSL2 → 容器 → bubblewrap 沙箱 → Claude Code
+                         ↑
+                    需要 SYS_ADMIN 创建 namespace
+```
+
+bubblewrap 使用 Linux namespace 特性（`clone()`, `unshare()`, `mount()` 系统调用），这些都需要 `CAP_SYS_ADMIN` 能力。**没有它，沙箱将降级到仅容器隔离**。
+
+### 关于 SELinux 配置
+
+`--security-opt=label=disable` 的作用：
+
+| 容器运行时 | 行为 |
+|------------|------|
+| Docker | 忽略此选项（Docker 不使用 SELinux） |
+| Podman (Fedora/RHEL) | 禁用 SELinux 标签，避免权限冲突 |
+
+这是 Docker/Podman 兼容性的最优解。更精细的 SELinux 策略需要根据宿主机发行版定制，会增加维护复杂度。
+
+## 版本信息
+
+| 组件 | 版本 | 说明 |
+|------|------|------|
+| Claude Code CLI | 2.1.161 | 锁定版本，确保一致性 |
+| Ubuntu | 24.04 | LTS 版本 |
+| Node.js | 22.x | LTS 版本 |
+| bubblewrap | 系统 package | Ubuntu 24.04 版本 |

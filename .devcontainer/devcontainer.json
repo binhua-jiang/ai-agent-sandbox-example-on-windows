@@ -2,7 +2,12 @@
     "name": "ubuntu24-ai-sandbox",
     "build": {
         "dockerfile": "../images/Dockerfile",
-        "context": ".."
+        "context": "..",
+        "args": {
+            "USERNAME": "devuser",
+            "USER_UID": "1000",
+            "USER_GID": "1000"
+        }
     },
     "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
     "runArgs": [
@@ -27,9 +32,11 @@
         }
     },
     "containerEnv": {
-        "DISABLE_LOGIN_COMMAND": "1"
+        "DISABLE_LOGIN_COMMAND": "1",
+        "WORKSPACE_ROOT": "/workspaces/${localWorkspaceFolderBasename}"
     },
-    "remoteUser": "root",
+    "remoteUser": "devuser",
     "overrideCommand": true,
-    "postCreateCommand": "bash .devcontainer/setup.sh"
+    "postCreateCommand": "bash .devcontainer/setup.sh",
+    "updateRemoteUserUID": true
 }
