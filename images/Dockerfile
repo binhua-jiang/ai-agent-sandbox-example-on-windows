@@ -3,6 +3,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Base tooling for a development sandbox.
+# Install bubblewrap with CAP_SYS_ADMIN capability so non-root users can create namespaces.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		bubblewrap \
@@ -11,9 +12,11 @@ RUN apt-get update \
 		git \
 		gnupg \
 		less \
+		libcap2-bin \
 		socat \
 		unzip \
 		zsh \
+	&& setcap cap_sys_admin+ep /usr/bin/bwrap \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Install C++ build toolchain (gcc + clang).

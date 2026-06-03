@@ -1,75 +1,47 @@
 {
     "$schema": "https://json.schemastore.org/claude-code-settings.json",
-    "sandbox": {
-        "enabled": true,
-        "autoAllowBashIfSandboxed": true,
-        "filesystem": {
-            "denyRead": [
-                "./core/src",
-                "./core/src/**",
-                "./.env",
-                "./.env.*",
-                "./.git/config",
-                "./.git/credentials",
-                "./.ssh/**",
-                "**/*.pem",
-                "**/*.key",
-                "**/*.p12",
-                "**/*.pfx",
-                "./.npmrc",
-                "./.pypirc",
-                "./.netrc"
-            ],
-            "denyWrite": [
-                "./core/src",
-                "./core/src/**",
-                "./.env",
-                "./.env.*",
-                "./.claude/settings.json",
-                "./.git/config",
-                "./.git/credentials",
-                "./.ssh/**",
-                "**/*.pem",
-                "**/*.key",
-                "**/*.p12",
-                "**/*.pfx",
-                "./.npmrc",
-                "./.pypirc",
-                "./.netrc"
-            ]
-        }
-    },
     "permissions": {
         "deny": [
-            "Read(./core/src)",
-            "Read(./core/src/**)",
             "Read(./.env)",
             "Read(./.env.*)",
-            "Read(./.git/config)",
-            "Read(./.git/credentials)",
-            "Read(./.ssh/**)",
-            "Read(**/*.pem)",
-            "Read(**/*.key)",
-            "Read(**/*.p12)",
-            "Read(**/*.pfx)",
-            "Read(./.npmrc)",
-            "Read(./.pypirc)",
-            "Read(./.netrc)",
-            "Write(./core/src)",
-            "Write(./core/src/**)",
-            "Write(./.env)",
-            "Write(./.env.*)",
-            "Write(./.claude/settings.json)",
-            "Write(./.git/config)",
-            "Write(./.git/credentials)",
-            "Write(./.ssh/**)",
-            "Write(**/*.pem)",
-            "Write(**/*.key)",
-            "Write(**/*.p12)",
-            "Write(**/*.pfx)",
-            "Write(./.npmrc)",
-            "Write(./.pypirc)",
-            "Write(./.netrc)"
+            "Read(./core/src/**)",
+            "Read(./.git/**)",
+            "Edit(./.env)",
+            "Edit(./.env.*)",
+            "Edit(./core/src/**)",
+            "Edit(./.git/**)",
+            "Edit(./.claude/settings.json)"
         ]
+    },
+
+    "sandbox": {
+        "enabled": true,
+        "failIfUnavailable": false,
+        "autoAllowBashIfSandboxed": true,
+        "allowUnsandboxedCommands": false,
+        "filesystem": {
+            "denyRead": [
+                "./.env",
+                "./core/src",
+                "./.git"
+            ],
+            "denyWrite": [
+                "./.env",
+                "./core/src",
+                "./.git",
+                "./.claude/settings.json"
+            ],
+            "allowWrite": [
+                "/tmp/claude"
+            ]
+        },
+        "network": {
+            "allowedDomains": [
+                "api.anthropic.com",
+                "*.anthropic.com",
+                "docs.anthropic.com",
+                "code.claude.com"
+            ]
+        }
     }
 }

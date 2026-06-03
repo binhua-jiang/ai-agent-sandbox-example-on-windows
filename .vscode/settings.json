@@ -1,0 +1,24 @@
+{
+    "chat.agent.sandbox.enabled": "on",
+    "chat.agent.sandbox.fileSystem.linux": {
+        "allowWrite": ["."],
+        "denyWrite": ["./.git/", "./.env", "./core/src/"],
+        "denyRead": ["./.env", "./.git/", "./core/src/"]
+    },
+    "chat.agent.networkFilter": true,
+    "chat.agent.allowedNetworkDomains": [
+        "api.github.com",
+        "*.github.com",
+        "npmjs.com",
+        "*.npmjs.com"
+    ],
+    "search.exclude": {
+        "**/core/src/**": true,
+        "**/.env": true,
+        "**/.git/**": true
+    },
+    "files.watcherExclude": {
+        "**/core/src/**": true,
+        "**/.git/**": true
+    }
+}
