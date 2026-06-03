@@ -9,10 +9,10 @@
 "看不到"即"动不了"，从而在保留 AI 编码能力的同时，避免核心源码泄漏、密钥外泄和危险命令对宿主机的影响。
 
 > ⚠️ **沙箱层的强度因 agent 而异，差距巨大：**
-> - **Claude Code**：bubblewrap 在内核 namespace 层做隔离，对 CLI 进程及其所有子进程、syscall 一视同仁，强度高。
+> - **Claude Code CLI**：bubblewrap 在内核 namespace 层做隔离，对 CLI 进程及其所有子进程、syscall 一视同仁，强度高。
 > - **GitHub Copilot Agent**：其内置的 `chat.agent.sandbox.*` 实际只是"**终端沙箱**"，仅约束 `run_in_terminal` 工具；`readFile` / `grepSearch` 等内建文件工具走扩展进程的文件系统 API，**完全绕过** `denyRead` 规则。也就是说，仅靠 VS Code 原生设置**无法**阻止 Copilot Agent 读取 `.env`。
 >
-> 因此，**容器层（决定"挂不挂"）才是真正可靠的边界**；沙箱层是纵深防御。详见下文 [Claude Code 沙箱 vs GitHub Copilot Agent 沙箱](#claude-code-沙箱-vs-github-copilot-agent-沙箱)。
+> 因此，**容器层（决定"挂不挂"）才是真正可靠的边界**；沙箱层是纵深防御。详见下文 [Claude Code CLI 沙箱 vs GitHub Copilot Agent 沙箱](#claude-code-cli-沙箱-vs-github-copilot-agent-沙箱)。
 
 ## 快速开始
 
@@ -34,7 +34,7 @@
 
 2. **在 VS Code 中打开容器**：执行 "Dev Containers: Reopen in Container"
 
-3. **使用 Claude Code**：容器启动后自动配置沙箱，直接使用 Claude Code for VS Code 扩展即可
+3. **使用 Claude Code CLI**：容器启动后自动配置沙箱，直接使用 Claude Code for VS Code 扩展即可
 
 4. **构建 Demo**（可选）：
 
@@ -94,7 +94,7 @@ core/
 └── include/    # 头文件（可读写）
 demo/           # 可执行程序
 .claude/
-└── settings.json    # Claude Code 沙箱配置（权限与隔离规则）
+└── settings.json    # Claude Code CLI 沙箱配置（权限与隔离规则）
 .vscode/
 └── settings.json    # GitHub Copilot Agent 终端沙箱配置
 .devcontainer/
@@ -127,11 +127,11 @@ images/
 - 保护 `.env`（必须留在仓库内）：✅ bwrap 用 `/dev/null` 绑定覆盖（强保护）；settings.json deny 仅兜底。
 - 保护 `core/src/`：✅ bwrap 用 tmpfs 空目录覆盖，让 CLI 在沙箱里看不到任何内容（强保护）；settings.json deny 兜底。
 
-## Claude Code 沙箱 vs GitHub Copilot Agent 沙箱
+## Claude Code CLI 沙箱 vs GitHub Copilot Agent 沙箱
 
 两者都叫"沙箱"，但**隔离层级和作用范围差异巨大**，理解这点才能避免误判安全边界。
 
-| 维度 | Claude Code | GitHub Copilot Agent |
+| 维度 | Claude Code CLI | GitHub Copilot Agent |
 |------|--------------------|--------------------|
 | 实现层级 | Linux 内核 namespace（bubblewrap） | VS Code 扩展进程的命令拦截 |
 | 作用范围 | 整个 CLI 进程 + 所有子进程 + 所有 syscall | 仅 `run_in_terminal` 工具 |
@@ -142,7 +142,7 @@ images/
 | 绕过难度 | 需突破内核 namespace | 调用任意非终端工具即可 |
 
 **结论：**
-- **Claude Code**：真正的隔离来自 bwrap（决定 CLI "看不看得到"）；`settings.json` 的 deny 规则只是兜底，用于防误操作和纵深防御。
+- **Claude Code CLI**：真正的隔离来自 bwrap（决定 CLI "看不看得到"）；`settings.json` 的 deny 规则只是兜底，用于防误操作和纵深防御。
 - **GitHub Copilot Agent**：`chat.agent.sandbox.*` 实际是"**终端沙箱**"而非"**工具沙箱**"——`readFile` 等内建工具走扩展进程的文件系统 API，**完全绕过** `denyRead`。仅靠它**无法阻止** Agent 读取 `.env`。
 
 ## 隔离策略
