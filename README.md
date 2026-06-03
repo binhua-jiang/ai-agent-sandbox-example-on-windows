@@ -1,6 +1,6 @@
 # Claude Code CLI Podman 沙箱示例
 
-在 Podman 容器中运行 Claude Code CLI 的沙箱隔离示例，支持 VS Code 扩展集成。
+在 Podman 容器中运行 Claude Code CLI 的沙箱隔离示例，支持 Claude Code for VS Code 扩展集成。
 
 ## 项目结构
 
