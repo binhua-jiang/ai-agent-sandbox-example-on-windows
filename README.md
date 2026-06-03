@@ -43,7 +43,49 @@
    ./build/demo/demo
    ```
 
-## 架构概览
+## 核心理念
+
+**沙箱的本质是为 AI Agent 划定可触达的资源边界，而不是在边界内部做细粒度的访问控制。**
+
+一旦某个文件已经被挂载/暴露进沙箱，再用应用层的 "deny 规则" 去禁止读写就很脆弱：
+任何使用底层 syscall、子进程，或不遵守该规则的工具，都能绕过它。
+真正可靠的隔离是**从一开始就让敏感内容在沙箱里"不存在"**——agent 看不到，就无从读写。
+
+### 强保护 vs 弱保护
+
+| 层级 | 实现方式 | 强度 | 适用场景 |
+|------|----------|------|----------|
+| **不挂载** | 容器层不挂载宿主机其他目录 | ★★★★★ 内核级 | 工作区外的敏感内容（`~/.ssh`、宿主机文件等） |
+| **覆盖** | bwrap 用 tmpfs 空目录覆盖；`/dev/null` 绑定 | ★★★★☆ 物理上不可见 | 必须留在仓库里的敏感文件（`.env`、`core/src/`） |
+| **网络隔离** | 容器网络策略；bwrap `--unshare-net` | ★★★★☆ | 阻止数据外发 |
+| **应用层 deny 规则** | `.claude/settings.json`、VS Code 配置 | ★★☆☆☆ 可绕过 | 防误操作的纵深防御，不可作为唯一防线 |
+
+**举例：**
+- 保护 `~/.ssh/id_rsa`：✅ 容器层不挂载主目录（强保护）。❌ 挂载主目录 + denyRead（弱）。
+- 保护 `.env`（必须留在仓库内）：✅ bwrap 用 `/dev/null` 绑定覆盖（强保护）；settings.json deny 仅兜底。
+- 保护 `core/src/`：✅ bwrap 用 tmpfs 空目录覆盖，让 CLI 在沙箱里看不到任何内容（强保护）；settings.json deny 兜底。
+
+### Claude Code CLI 沙箱 vs GitHub Copilot Agent 沙箱
+
+两者都叫"沙箱"，但**隔离层级和作用范围差异巨大**，理解这点才能避免误判安全边界。
+
+| 维度 | Claude Code CLI | GitHub Copilot Agent |
+|------|--------------------|--------------------|
+| 实现层级 | Linux 内核 namespace（bubblewrap） | VS Code 扩展进程的命令拦截 |
+| 作用范围 | 整个 CLI 进程 + 所有子进程 + 所有 syscall | 仅 `run_in_terminal` 工具 |
+| 内建工具（`readFile`/`grepSearch`/`listDir` 等） | ✅ 受 namespace 约束 | ❌ 完全绕过沙箱 |
+| 文件隐藏 | tmpfs / `/dev/null` 物理覆盖，真正不可见 | 仅靠 `denyRead` 配置，工具不遵守 |
+| 网络隔离 | 容器层 + bwrap namespace | `chat.agent.networkFilter` 仅约束 fetch 工具与内置浏览器 |
+| 配置位置 | `.claude/settings.json` + wrapper 脚本 | `.vscode/settings.json` 的 `chat.agent.sandbox.*` |
+| 绕过难度 | 需突破内核 namespace | 调用任意非终端工具即可 |
+
+**结论：**
+- **Claude Code CLI**：真正的隔离来自 bwrap（决定 CLI "看不看得到"）；`settings.json` 的 deny 规则只是兜底，用于防误操作和纵深防御。
+- **GitHub Copilot Agent**：`chat.agent.sandbox.*` 实际是"**终端沙箱**"而非"**工具沙箱**"——`readFile` 等内建工具走扩展进程的文件系统 API，**完全绕过** `denyRead`。仅靠它**无法阻止** Agent 读取 `.env`。
+
+## 实现细节
+
+### 架构概览
 
 本示例采用 **容器 + bubblewrap** 的双层隔离：
 - **容器层**（Docker/Podman）：限定挂载到容器的宿主机目录，约束 VS Code Server、Copilot Agent 及 Claude Code CLI 的整体可达范围。
@@ -86,7 +128,23 @@ Windows → WSL2 (Linux 内核) → 容器 → bubblewrap 沙箱 → Claude Code
 └───────────────────────────────────────────────────────────┘
 ```
 
-## 项目结构
+### 隔离策略
+
+本项目通过 bubblewrap 在内核 namespace 层做物理隔离，对所有进程（包括 CLI 子进程及未来可能新增的工具）一视同仁。下表"隔离方式"按强度排序，**强保护**是真正的边界，**兜底**仅用于纵深防御：
+
+| 路径 | 读权限 | 写权限 | 隔离方式 |
+|------|--------|--------|----------|
+| `core/src/**` | ❌ 不可见 | ❌ 禁止 | **强**：tmpfs 空目录覆盖；**兜底**：settings.json deny |
+| `core/include/**` | ✅ 可读 | ✅ 可写 | 正常挂载 |
+| `.env`, `.env.*` | ❌ 不可读 | ❌ 禁止 | **强**：`/dev/null` 绑定覆盖；**兜底**：settings.json deny |
+| `.claude/settings.json` | ✅ 可读 | ❌ 禁止 | **弱**：仅 settings.json denyWrite（防误改） |
+| `.git/config`, `.git/credentials` | ❌ 不可读 | ❌ 禁止 | settings.json deny（建议配合 bwrap 用 `/dev/null` 绑定覆盖） |
+| 工作区外路径（如 `~/.ssh`） | ❌ 不可见 | ❌ 不可见 | **强**：容器层本就不会挂载这些宿主机目录 |
+| 其他工作区文件 | ✅ 正常访问 | ✅ 正常访问 | 正常挂载 |
+
+容器需要 `--cap-add=SYS_ADMIN` 以支持 bubblewrap 命名空间隔离。
+
+### 项目结构
 
 ```
 core/
@@ -105,65 +163,11 @@ images/
 └── Dockerfile           # 容器镜像构建配置
 ```
 
-## 设计理念：沙箱的核心价值
+## 运维与排错
 
-**沙箱的本质是为 AI Agent 划定可触达的资源边界，而不是在边界内部做细粒度的访问控制。**
+### 容器运行时
 
-一旦某个文件已经被挂载/暴露进沙箱，再用应用层的 "deny 规则" 去禁止读写就很脆弱：
-任何使用底层 syscall、子进程，或不遵守该规则的工具，都能绕过它。
-真正可靠的隔离是**从一开始就让敏感内容在沙箱里"不存在"**——agent 看不到，就无从读写。
-
-### 强保护 vs 弱保护
-
-| 层级 | 实现方式 | 强度 | 适用场景 |
-|------|----------|------|----------|
-| **不挂载** | 容器层不挂载宿主机其他目录 | ★★★★★ 内核级 | 工作区外的敏感内容（`~/.ssh`、宿主机文件等） |
-| **覆盖** | bwrap 用 tmpfs 空目录覆盖；`/dev/null` 绑定 | ★★★★☆ 物理上不可见 | 必须留在仓库里的敏感文件（`.env`、`core/src/`） |
-| **网络隔离** | 容器网络策略；bwrap `--unshare-net` | ★★★★☆ | 阻止数据外发 |
-| **应用层 deny 规则** | `.claude/settings.json`、VS Code 配置 | ★★☆☆☆ 可绕过 | 防误操作的纵深防御，不可作为唯一防线 |
-
-**举例：**
-- 保护 `~/.ssh/id_rsa`：✅ 容器层不挂载主目录（强保护）。❌ 挂载主目录 + denyRead（弱）。
-- 保护 `.env`（必须留在仓库内）：✅ bwrap 用 `/dev/null` 绑定覆盖（强保护）；settings.json deny 仅兜底。
-- 保护 `core/src/`：✅ bwrap 用 tmpfs 空目录覆盖，让 CLI 在沙箱里看不到任何内容（强保护）；settings.json deny 兜底。
-
-## Claude Code CLI 沙箱 vs GitHub Copilot Agent 沙箱
-
-两者都叫"沙箱"，但**隔离层级和作用范围差异巨大**，理解这点才能避免误判安全边界。
-
-| 维度 | Claude Code CLI | GitHub Copilot Agent |
-|------|--------------------|--------------------|
-| 实现层级 | Linux 内核 namespace（bubblewrap） | VS Code 扩展进程的命令拦截 |
-| 作用范围 | 整个 CLI 进程 + 所有子进程 + 所有 syscall | 仅 `run_in_terminal` 工具 |
-| 内建工具（`readFile`/`grepSearch`/`listDir` 等） | ✅ 受 namespace 约束 | ❌ 完全绕过沙箱 |
-| 文件隐藏 | tmpfs / `/dev/null` 物理覆盖，真正不可见 | 仅靠 `denyRead` 配置，工具不遵守 |
-| 网络隔离 | 容器层 + bwrap namespace | `chat.agent.networkFilter` 仅约束 fetch 工具与内置浏览器 |
-| 配置位置 | `.claude/settings.json` + wrapper 脚本 | `.vscode/settings.json` 的 `chat.agent.sandbox.*` |
-| 绕过难度 | 需突破内核 namespace | 调用任意非终端工具即可 |
-
-**结论：**
-- **Claude Code CLI**：真正的隔离来自 bwrap（决定 CLI "看不看得到"）；`settings.json` 的 deny 规则只是兜底，用于防误操作和纵深防御。
-- **GitHub Copilot Agent**：`chat.agent.sandbox.*` 实际是"**终端沙箱**"而非"**工具沙箱**"——`readFile` 等内建工具走扩展进程的文件系统 API，**完全绕过** `denyRead`。仅靠它**无法阻止** Agent 读取 `.env`。
-
-## 隔离策略
-
-本项目通过 bubblewrap 在内核 namespace 层做物理隔离，对所有进程（包括 CLI 子进程及未来可能新增的工具）一视同仁。下表"隔离方式"按强度排序，**强保护**是真正的边界，**兜底**仅用于纵深防御：
-
-| 路径 | 读权限 | 写权限 | 隔离方式 |
-|------|--------|--------|----------|
-| `core/src/**` | ❌ 不可见 | ❌ 禁止 | **强**：tmpfs 空目录覆盖；**兜底**：settings.json deny |
-| `core/include/**` | ✅ 可读 | ✅ 可写 | 正常挂载 |
-| `.env`, `.env.*` | ❌ 不可读 | ❌ 禁止 | **强**：`/dev/null` 绑定覆盖；**兜底**：settings.json deny |
-| `.claude/settings.json` | ✅ 可读 | ❌ 禁止 | **弱**：仅 settings.json denyWrite（防误改） |
-| `.git/config`, `.git/credentials` | ❌ 不可读 | ❌ 禁止 | settings.json deny（建议配合 bwrap 用 `/dev/null` 绑定覆盖） |
-| 工作区外路径（如 `~/.ssh`） | ❌ 不可见 | ❌ 不可见 | **强**：容器层本就不会挂载这些宿主机目录 |
-| 其他工作区文件 | ✅ 正常访问 | ✅ 正常访问 | 正常挂载 |
-
-容器需要 `--cap-add=SYS_ADMIN` 以支持 bubblewrap 命名空间隔离。
-
-## 容器运行时
-
-### Docker vs Podman
+#### Docker vs Podman
 
 | 功能 | Docker | Podman |
 |------|--------|--------|
@@ -173,7 +177,7 @@ images/
 | 守护进程 | 需要 dockerd | 无需守护进程 |
 | Socket 路径 | `/var/run/docker.sock` | `XDG_RUNTIME_DIR/podman/podman.sock` |
 
-### 验证
+#### 验证
 
 **Docker：**
 
@@ -198,9 +202,9 @@ podman info
 }
 ```
 
-## 故障排查
+### 故障排查
 
-### 常见问题
+#### 常见问题
 
 | 问题 | 可能原因 | 解决方案 |
 |------|----------|----------|
@@ -212,7 +216,7 @@ podman info
 | SELinux 阻止访问 | Fedora/RHEL/CentOS SELinux 策略 | 确认 `--security-opt=label=disable` 已配置 |
 | 权限不足 (非 root 用户) | devuser 无法修改系统路径 | wrapper 安装需要 sudo/root，setup.sh 会尝试使用 sudo |
 
-### 诊断命令
+#### 诊断命令
 
 ```bash
 # 检查 bwrap 是否可用
@@ -233,7 +237,7 @@ cat .env 2>/dev/null && echo "WARNING: .env readable!" || echo "OK: .env blocked
 ls core/src/ 2>/dev/null && echo "WARNING: core/src visible!" || echo "OK: core/src blocked"
 ```
 
-### 重置沙箱
+#### 重置沙箱
 
 如果 wrapper 配置出现问题，可以手动重置：
 
