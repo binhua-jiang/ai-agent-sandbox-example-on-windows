@@ -1,6 +1,10 @@
 # Windows 环境下 Claude Code CLI 沙箱示例
 
-在 Podman 容器中运行 Claude Code CLI 的沙箱隔离示例，支持 Claude Code for VS Code 扩展集成。 
+在 Podman 容器中运行 Claude Code CLI 的沙箱隔离示例，支持 Claude Code for VS Code 扩展集成。
+
+## 为什么需要沙箱
+
+沙箱为 AI 辅助开发提供了安全边界：防止意外或不当操作修改敏感源码、泄露环境变量中的密钥、执行危险命令。同时保留 AI 助手的开发能力——可读写项目其他文件、运行构建和测试。这种"最小权限"原则让团队更放心地将 Claude Code 集成到工作流中。
 
 ## 项目结构
 
@@ -9,6 +13,8 @@ core/
 ├── src/        # 源码（沙箱隔离）
 └── include/    # 头文件（可读）
 demo/           # 可执行程序
+.claude/
+└── settings.json    # Claude Code 沙箱配置（权限与隔离规则）
 .devcontainer/
 ├── devcontainer.json    # 容器配置
 ├── setup.sh             # 容器创建时初始化（环境测试 + 沙箱包装器 + 插件安装）
