@@ -16,6 +16,17 @@ RUN apt-get update \
 		zsh \
 	&& rm -rf /var/lib/apt/lists/*
 
+# Install C++ build toolchain (gcc + clang).
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		gcc \
+		g++ \
+		clang \
+		cmake \
+		make \
+		gdb \
+	&& rm -rf /var/lib/apt/lists/*
+
 # Install Node.js (LTS) for CLI tooling distributed via npm.
 RUN mkdir -p /etc/apt/keyrings \
 	&& curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
