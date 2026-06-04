@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shim installed at /usr/local/bin/claude during image build.
-# Defers to the workspace wrapper so that the bwrap policy/logic can be
-# edited without rebuilding the image. WORKSPACE_ROOT is provided by
+# Defers to the workspace launcher so that runtime env loading can be edited
+# without rebuilding the image. WORKSPACE_ROOT is provided by
 # devcontainer.json's containerEnv.
 
 set -euo pipefail
@@ -17,7 +17,7 @@ WRAPPER="$WORKSPACE_ROOT/.devcontainer/claude-wrapper.sh"
 
 if [[ ! -x "$WRAPPER" ]]; then
     echo "claude: wrapper not found or not executable at $WRAPPER" >&2
-    echo "  Refusing to run without the sandbox wrapper." >&2
+    echo "  Refusing to run without the workspace launcher." >&2
     exit 1
 fi
 

@@ -32,7 +32,6 @@
     },
     "remoteUser": "devuser",
     "overrideCommand": true,
-    "initializeCommand": "chmod -R o+rwX . 2>/dev/null || true",
     "postCreateCommand": "bash .devcontainer/setup.sh",
     "updateRemoteUserUID": true
 }

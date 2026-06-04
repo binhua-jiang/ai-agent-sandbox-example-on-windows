@@ -2,21 +2,20 @@
 
 在 Docker/Podman 容器中运行 **GitHub Copilot Agent** 与 **Claude Code CLI** 的沙箱隔离示例。
 
-沙箱采用 **L1–L4 四层模型**：越外层越接近"内核硬隔离"，越内层越是"应用自律"。**每层对两个 agent 的覆盖强度不同**——这是理解整个项目的关键。
+本项目现在采用 **L1-L3 三层模型**。外层 bwrap（旧 L4）已经移除：它在 Windows/WSL2/Docker Desktop 上 ROI 太低，且会和 Claude Code CLI 自带的 Bash 沙箱踩同一类运行时限制。
 
-## 沙箱 4 层模型总览
+## 沙箱 3 层模型总览
 
 | 层 | 实现 | 默认状态 | Claude Code CLI | GitHub Copilot Agent |
 |----|------|---------|-----------------|---------------------|
-| **L1 容器层** | Docker/Podman 限定挂载、能力、网络 | ✅ 始终生效 | ★★★★★ 内核级 | ★★★★★ 内核级 |
-| **L2 内置 Bash/终端沙箱** | agent 自身实现 | ✅ 默认 | ★★★★☆ 内核级 bwrap 包 Bash 子进程 | ★★☆☆☆ 扩展进程级命令拦截 |
-| **L3 内置 deny/read/write 规则** | `.claude/settings.json` / `.vscode/settings.json` | ✅ 默认 | ★★★☆☆ 覆盖**所有内置工具** | ★★☆☆☆ **仅约束终端**，内置文件工具完全绕过 |
-| **L4 外层 bwrap**（可选） | `.devcontainer/claude-wrapper.sh` | 🔘 `CLAUDE_USE_BWRAP=1` | ★★★★☆ 包整个 claude 进程，syscall 级 | ❌ 不适用（Copilot 跑在 VS Code 扩展进程） |
+| **L1 容器层** | Docker/Podman 限定挂载、能力、网络 | 始终生效 | 内核级强边界 | 内核级强边界 |
+| **L2 内置 Bash/终端沙箱** | agent 自身实现 | 尽力启用 | bwrap 包 Bash 子进程；失败时降级 | VS Code 扩展进程级命令拦截 |
+| **L3 内置 deny/read/write 规则** | `.claude/settings.json` / `.vscode/settings.json` | 默认启用 | 覆盖 Claude 内置工具入口 | 主要约束终端命令，内置文件工具可绕过 |
 
-**两条关键结论：**
+两条关键结论：
 
-1. **只有 L1 对两个 agent 是平等的强保护**。L2/L3 在 Copilot 上明显弱化，L4 完全不覆盖 Copilot。对必须防 Copilot 的敏感内容，唯一可靠手段是**L1 不挂载**。
-2. **默认 L1+L2+L3 三层够用**：对 Claude，`Read`/`Edit`/`Write` 走 L3，`Bash` 走 L2，已覆盖常见威胁。**L4 是给"装外部 MCP 服务器、要求文件存在性隐藏、syscall 级强约束"等场景的额外保险**，仅 Linux/WSL2 可用。
+1. **L1 是唯一对两个 agent 都平等可靠的强保护**。对必须防 Copilot 或未知工具读取的敏感内容，最可靠手段是 L1 不挂载。
+2. **L2 在 Docker Desktop 上必须按探针结果判断**。Claude 的 L2 依赖 bwrap；如果 `bwrap --die-with-parent --bind / / --true` 失败，Claude Bash 子进程不会获得内核级 bwrap 隔离，此时有效边界收敛为 L1 + L3。
 
 ## 快速开始
 
@@ -24,12 +23,7 @@
 
 - Docker 20.10+ 或 Podman 4.0+
 - VS Code + Dev Containers 扩展
-- **平台兼容性**：默认配置（L1+L2+L3）在 Linux / WSL2 / macOS Docker Desktop 上**都能正常运行**
-- **L4 仅在 Linux/WSL2 可用**：
-  - Linux 宿主：原生支持 user namespace
-  - Windows：WSL2 + Docker/Podman
-  - **macOS**：Docker Desktop / Podman libkrun 的 Linux VM 不开放 user namespace，即便加了 `CAP_SYS_ADMIN` 也跑不起来 bwrap——在 macOS 上**不要**设 `CLAUDE_USE_BWRAP=1`，否则 claude 启动会直接 hard-fail
-  - **Ubuntu 24.04+ 宿主**：宿主默认 `kernel.apparmor_restrict_unprivileged_userns=1` 会阻止非特权 userns。本仓库已在镜像层（setuid bwrap）+ 容器层（`apparmor=unconfined`）规避，无需改宿主配置
+- Windows 推荐使用 Docker Desktop + WSL2 backend；但请注意，Docker Desktop 可能仍会让 Claude L2 bwrap 降级
 
 ### 步骤
 
@@ -39,440 +33,251 @@
    ANTHROPIC_AUTH_TOKEN=your-key      # 或 ANTHROPIC_API_KEY
    # ANTHROPIC_BASE_URL=...           # 可选，自定义 API 端点 / 网关
    # ANTHROPIC_MODEL=...              # 可选，固定模型
-   # CLAUDE_USE_BWRAP=1               # 可选，启用 L4 外层 bwrap（仅 Linux/WSL2）
    ```
-   完整模板见仓库根目录的 `.env.example`。
 
-2. **在 VS Code 中打开容器**：执行 "Dev Containers: Reopen in Container"。容器构建期镜像已包含 shim、devuser、bubblewrap setuid 等所有 L1–L4 基础设施。
+2. **在 VS Code 中打开容器**：执行 "Dev Containers: Reopen in Container"。镜像会安装 Claude Code CLI、bubblewrap、socat、C++ 工具链，并创建非 root 的 `devuser`。
 
-3. **首次 attach 后**：`setup.sh` 会校验环境（claude/claude-real/bwrap 是否就位）、装 Claude 插件、并在末尾打印 **L1–L4 各层激活状态**——重点看 `L2 Claude bwrap` 是 `✓ active` 还是 `⚠ degraded`，后者意味着当前 VM 不支持 user namespace（macOS 上很常见）。
+3. **首次 attach 后**：`setup.sh` 会校验 claude/claude-real/bwrap 是否就位，安装 Claude 插件，并打印 L1-L3 状态。重点看 `L2 Claude bwrap` 是 `active` 还是 `degraded`。
 
-4. **使用 agent**：直接用 Claude Code 或 Copilot 即可。L2/L3 自动按 `.claude/settings.json` 和 `.vscode/settings.json` 的规则约束。
+4. **使用 agent**：直接用 Claude Code 或 Copilot。Claude 的 L3 规则来自 `.claude/settings.json`，Copilot 的终端沙箱规则来自 `.vscode/settings.json`。
 
-5. **构建 Demo**（可选，由**你（人）**在容器终端运行）：
+5. **构建 Demo**（可选，由你在容器终端运行）：
 
    ```bash
    cmake -S . -B build && cmake --build build
    ./build/demo/demo
    ```
 
-   **不要让 agent 替你运行**：`core/src/` 被 L3 `denyRead` 阻塞，`cmake --build` 会因 gcc 读不到源码而失败——这正是本仓库想展示的"L3 让 agent 看不到敏感源码"的效果。
-
-> **离线构建镜像**（不走 VS Code Dev Containers，例如 CI）：仓库根的 `Makefile` 提供 `make image` 目标，相当于 `docker build -f images/Dockerfile -t ubuntu24-ai-sandbox:latest .`，支持 `CONTAINER_ENGINE=podman` 切换。
+   不要让 agent 替你运行这个构建：`core/src/` 被 L3 `denyRead` 阻塞，agent 触发构建时编译器可能读不到源码。这正是本仓库想展示的隔离效果。
 
 ## L1：容器层
 
-**作用**：限定从宿主到容器的挂载、网络、能力。**对两个 agent 平等强保护**——这是 4 层中唯一一条真正无歧视的边界，也是最可靠的一道。
+**作用**：限定从宿主到容器的挂载、网络、能力。L1 是三层里最可靠的一层，也是两个 agent 共享的强边界。
 
 **实现位置**：`.devcontainer/devcontainer.json` + `images/Dockerfile`
 
-**关键约束**：
-- 工作区目录是唯一被挂载进来的宿主路径——`~/.ssh`、`~/.aws`、`~/.gitconfig` 等都**没挂**，agent 看不见
-- 容器以非特权用户 `devuser`（UID 1000）运行，不是 root
-- 加了 `--cap-add=SYS_ADMIN` 与 `--security-opt=apparmor=unconfined`——这两个是给 **L2 的 Claude 内置 Bash 沙箱**（也用 bwrap）放行 user namespace 需要的，不是给 agent 自己用的
+关键约束：
 
-**为什么 L1 才是真正的边界**：一旦某文件挂进容器，无论 L2/L3/L4 做什么文章，理论上都可能被绕过；唯一不可绕的是"**这个路径在容器里根本不存在**"。设计敏感数据保护时，**第一选择永远是不挂载**。
+- 工作区目录是唯一被挂载进来的宿主路径；`~/.ssh`、`~/.aws`、`~/.gitconfig` 等宿主凭据不挂载进容器
+- 容器以非特权用户 `devuser` 运行，不是 root
+- 镜像安装 `bubblewrap` 和 `socat`，供 Claude 内置 L2 Bash 沙箱使用
+- `devcontainer.json` 保留 `SYS_ADMIN`、`apparmor=unconfined`、`seccomp=unconfined` 等配置，以尽量放行 Claude L2 bwrap；但 Docker Desktop 运行时仍可能让 bwrap 降级
+
+为什么 L1 最重要：一旦文件被挂进容器，后续 L2/L3 都属于补充约束；唯一不可绕的事实是“这个路径在容器里根本不存在”。设计敏感数据保护时，第一选择永远是不挂载。
 
 | 路径 | L1 状态 | 后果 |
 |------|---------|------|
-| `~/.ssh`、宿主主目录、宿主任意 | ❌ 不挂载 | agent 看不见，无从读写——这是最强保护 |
-| 工作区目录 | ✅ 挂载（读写） | 后续靠 L2/L3/L4 细分 |
+| `~/.ssh`、宿主主目录、云凭据目录 | 不挂载 | agent 看不见，无从读写 |
+| 工作区目录 | 挂载读写 | 后续靠 L2/L3 细分 |
 
 ## L2：内置 Bash/终端沙箱
 
-**作用**：限制 agent 执行的 shell 命令能访问哪些文件/网络。两个 agent 都有这一层，但实现机制完全不同。
+**作用**：限制 agent 执行的 shell 命令能访问哪些文件/网络。两个 agent 都有这一层，但实现强度差异很大。
 
-### L2 在 Claude Code CLI：内核级 bwrap
+### Claude Code CLI
 
-Claude Code CLI 在 Linux 上**内部就用 bubblewrap** 包裹每次 `Bash` 工具调用及其所有子进程，做 mount namespace + 网络过滤的隔离。这是 Claude 官方文档明确的实现机制，不依赖我们这个仓库的 L4。
+Claude Code CLI 在 Linux 上会尝试用 bubblewrap 包裹 Bash 工具调用及其子进程，提供 mount namespace 和网络过滤隔离。
 
-- **生效范围**：`Bash` 工具及其所有子进程、syscall
-- **不覆盖**：`Read`/`Edit`/`Write` 等不通过 shell 的工具——这些走 L3
-- **配置**：`.claude/settings.json` 的 `sandbox` 块（`filesystem.denyRead/denyWrite/allowWrite`、`network.allowedDomains` 等）
-- **依赖**：bubblewrap + socat（镜像已装）、`CAP_SYS_ADMIN`、user namespace 支持
+- 生效范围：`Bash` 工具及其子进程
+- 不覆盖：`Read`、`Edit`、`Write` 等非 shell 工具，这些走 L3
+- 配置：`.claude/settings.json` 的 `sandbox` 块
+- 依赖：bubblewrap + socat + 容器运行时允许相关 namespace/capability 操作
 
-> **macOS 注意**：Claude L2 用的也是 bubblewrap，在 macOS Docker Desktop / Podman libkrun 的 Linux VM 里同样会因为 **VM 不开放 user namespace** 而失败。`.claude/settings.json` 设了 `failIfUnavailable: false`，所以 Claude 会**静默降级**（打印警告 + Bash 子进程不沙箱）。也就是说在 macOS 上，Claude 的真实保护其实是 **L1 + L3**，L2 与 L4 都失效。`setup.sh` 启动时会检测并打印 `L2 Claude bwrap: ⚠ degraded` 提示。
+本项目的 `setup.sh` 会执行这个最小探针：
 
-参考：[Claude Code Sandboxing 文档](https://code.claude.com/docs/en/sandboxing)
+```bash
+bwrap --die-with-parent --bind / / --true
+```
 
-### L2 在 GitHub Copilot Agent：扩展进程级命令拦截
+如果探针失败，`setup.sh` 会打印 `L2 Claude bwrap: degraded`。这在 macOS Docker Desktop、Podman libkrun，以及某些 Windows/WSL2/Docker Desktop 组合里都可能发生。`.claude/settings.json` 设置了 `failIfUnavailable: false`，所以 Claude 仍可使用，但 Bash 子进程不再拥有 bwrap 隔离。
 
-Copilot 的 `chat.agent.sandbox.*` 是 **VS Code 扩展进程**层面的命令字符串拦截——不创建 namespace，不进入内核。仅约束 `run_in_terminal` 工具，强度比 Claude 的 L2 低一个数量级。
+### GitHub Copilot Agent
 
-- **生效范围**：仅 `run_in_terminal`
-- **配置**：`.vscode/settings.json` 的 `chat.agent.sandbox.*`、`chat.agent.networkFilter`
-- **绕过方式**：调用非终端工具即可——见 L3 一节
+Copilot 的 `chat.agent.sandbox.*` 是 VS Code 扩展进程层面的命令拦截，不创建 Linux namespace。
 
-### L2 强度对比
+- 生效范围：主要是 `run_in_terminal`
+- 配置：`.vscode/settings.json` 的 `chat.agent.sandbox.*` 和 `chat.agent.networkFilter`
+- 绕过方式：调用非终端工具，例如内置读文件、搜索、编辑工具
 
 | 维度 | Claude L2 | Copilot L2 |
 |------|-----------|------------|
-| 实现 | Linux 内核 bubblewrap namespace | VS Code 扩展进程命令拦截 |
-| 覆盖范围 | `Bash` + 所有子进程 + 所有 syscall | 仅 `run_in_terminal` |
-| 文件隔离 | 内核 mount namespace | 命令前置检查 |
-| 网络隔离 | 内置代理 + 域名 allowlist | 扩展层 fetch 拦截 |
-| 绕过难度 | 需突破 namespace | 改用非终端工具 |
+| 实现 | Linux bubblewrap namespace | VS Code 扩展进程命令拦截 |
+| 覆盖范围 | Bash + 子进程 | 主要是 `run_in_terminal` |
+| 降级风险 | Docker Desktop/VM 可能阻止 bwrap | 不依赖 bwrap |
+| 安全强度 | active 时较强；degraded 时失去内核隔离 | 较弱，偏自动批准控制 |
 
 ## L3：内置 deny/read/write 规则
 
-**作用**：在 agent **决定调用某个工具之前**，由 agent 自身评估权限规则、决定放行/拒绝/询问。两个 agent 都有，但覆盖范围天差地别。
+**作用**：agent 调用工具前，由 agent 自身根据权限规则决定放行、拒绝或询问。
 
-### L3 在 Claude Code CLI：覆盖所有内置工具
+### Claude Code CLI
 
-`.claude/settings.json` 的 `permissions.deny` / `permissions.allow` 应用于**所有内置工具**：`Read`、`Edit`、`Write`、`Bash`、`Glob`、`Grep`、`WebFetch`、`MCP` 调用。`sandbox.filesystem.*` 同时也被 L2（Claude 内置 Bash 沙箱）用作 bwrap 的 deny 列表。
-
-- **生效范围**：所有内置工具的调用入口
-- **MCP 工具**：是否走这套规则取决于具体 MCP 实现——大多数走，但不保证
-- **配置**：`.claude/settings.json` 的 `permissions.deny` + `sandbox.filesystem.*`
+`.claude/settings.json` 的 `permissions.deny` / `permissions.allow` 应用于 Claude 的内置工具入口，包括 `Read`、`Edit`、`Write`、`Bash`、`Glob`、`Grep`、`WebFetch` 等。`sandbox.filesystem.*` 同时会被 Claude L2 Bash 沙箱读取，用于生成 bwrap 约束。
 
 本仓库 L3 配置示例：
 
 | 路径 | L3 配置 | 效果 |
 |------|--------|------|
-| `.env`、`.env.*` | `Read(./.env*)` deny + `sandbox.filesystem.denyRead` | 内置工具读不到 |
-| `core/src/**` | `Read(./core/src/**)` deny + denyRead/denyWrite | 内置工具读写不到 |
+| `.env`、`.env.*` | `Read(./.env*)` deny + `sandbox.filesystem.denyRead` | Claude 内置工具读不到 |
+| `core/src/**` | `Read(./core/src/**)` deny + denyRead/denyWrite | Claude 内置工具读写不到 |
 | `.git/**` | `Edit(./.git/**)` deny + denyWrite | 可读不可写 |
-| `.claude/settings.json` 自身 | `Edit(./.claude/settings.json)` deny | 防 agent 修改自己规则 |
+| `.claude/settings.json` | `Edit(./.claude/settings.json)` deny | 防 agent 修改自己规则 |
 
-### L3 在 GitHub Copilot Agent：仅约束终端，内置文件工具完全绕过
+### GitHub Copilot Agent
 
-这是 Copilot 沙箱**最大的认知陷阱**：`chat.agent.sandbox.fileSystem.linux.denyRead/denyWrite` **只在 `run_in_terminal` 工具上生效**。Copilot 的 `readFile`、`grepSearch`、`listDir` 等内置文件工具走 VS Code 扩展进程的文件系统 API，**完全不过这套规则**。
-
-**也就是说：仅靠 `.vscode/settings.json` 的 `denyRead`，根本拦不住 Copilot 读 `.env`**。
-
-- **生效范围**：仅 `run_in_terminal` 工具
-- **绕过方式**：Copilot 默认调用 `readFile` 而不是 `cat`——天然绕过
-- **配置**：`.vscode/settings.json` 的 `chat.agent.sandbox.fileSystem.*`
-
-> **`.git` 策略不对称的原因**：`.claude/settings.json` 允许读 `.git`（agent 常需 `git log/diff/blame` 辅助理解代码），但 `.vscode/settings.json` 把 `.git/` 写进了 `denyRead`。这是有意的非对称：Copilot 的 L3 既然只能约束终端，那就把"agent 用 `cat .git/config` 看 token"这类**终端层面的尝试**显式拒掉；Copilot 的内置 `readFile` 仍能看到 `.git`，但那已经超出 L3 能管的范围——真正想防 Copilot 读 `.git` 只能靠 L1（不挂载，但 `.git` 必须在仓库内，所以不可行）。
-
-### L3 强度对比
+Copilot 的 `chat.agent.sandbox.fileSystem.linux.denyRead/denyWrite` 主要约束终端命令，不约束 Copilot 的内置文件工具。也就是说，仅靠 `.vscode/settings.json` 的 `denyRead`，不能阻止 Copilot 通过内置工具读取工作区内文件。
 
 | 内置工具 | Claude L3 | Copilot L3 |
 |---------|-----------|------------|
-| 读文件 | ✅ `Read` 走 `permissions.deny` | ❌ `readFile` 绕过 sandbox 规则 |
-| 写文件 | ✅ `Edit`/`Write` 走 `permissions.deny` | ❌ `applyPatch` 等绕过 |
-| 跑 shell | ✅ `Bash` 受 L3 检查 + L2 bwrap 双层 | ⚠️ `run_in_terminal` 受 L3 检查 |
-| 搜索 | ✅ `Grep`/`Glob` 走 `permissions.deny` | ❌ `grepSearch` 绕过 |
+| 读文件 | `Read` 走 `permissions.deny` | 内置读文件工具绕过 sandbox 规则 |
+| 写文件 | `Edit`/`Write` 走 `permissions.deny` | 内置编辑工具绕过 sandbox 规则 |
+| 跑 shell | L3 检查 + L2 bwrap（如果 active） | `run_in_terminal` 受 sandbox 规则约束 |
+| 搜索 | `Grep`/`Glob` 走 `permissions.deny` | 内置搜索工具绕过 sandbox 规则 |
 
-**结论**：对 Copilot 而言，L3 几乎只是个**反垃圾命令机制**，不是数据保护机制。**Copilot 的敏感数据保护必须靠 L1。**
+结论：对 Copilot 而言，敏感数据保护必须靠 L1。不要把不希望 Copilot 看到的内容挂进容器。
 
-## L4：外层 bwrap（可选，仅 Claude）
+## Claude launcher：为什么还保留 wrapper
 
-**作用**：把整个 `claude` 进程包进 bubblewrap 的 mount namespace，按 `.devcontainer/bwrap-policy.conf` 做路径级覆盖。补足 L2/L3 在 MCP 工具、未知工具、文件存在性隐藏方面的盲区。
+放弃 L4 后，wrapper 不再承担沙箱职责。它只是一个轻量 launcher：
 
-**默认关闭**。需要时在 `.env` 加：
-
-```bash
-CLAUDE_USE_BWRAP=1
+```text
+/usr/local/bin/claude (image shim)
+  -> .devcontainer/claude-wrapper.sh
+       -> source .env
+       -> exec claude-real
 ```
 
-**关键限制**：**仅 Claude，仅 Linux/WSL2**。Copilot 跑在 VS Code 扩展进程，不在我们包的 `claude` 进程里，L4 完全不覆盖它。
+保留它有两个原因：
 
-### L4 行为
+- `claude-wrapper.sh` 位于工作区，可以热改 `.env` 加载逻辑而不用重建镜像
+- Dockerfile 只需要在构建期植入稳定 shim，真实 Claude 二进制位置通过 PATH 查找，适配 `/usr/bin` 或 `/usr/local/bin` 的 npm prefix 差异
 
-| 状态 | 行为 |
-|------|------|
-| `CLAUDE_USE_BWRAP` 未设 / `0`（默认） | wrapper 直接 exec claude-real，跳过 bwrap |
-| `CLAUDE_USE_BWRAP=1` + bwrap 可用 | wrapper 走完整 bwrap 策略 |
-| `CLAUDE_USE_BWRAP=1` + bwrap 不可用（如 macOS） | wrapper hard-fail 拒绝运行，明确报错——不静默降级 |
-
-### L4 策略（`.devcontainer/bwrap-policy.conf`）
-
-| 路径 | bwrap 动作 | 效果 |
-|------|------------|------|
-| `core/src/**` | `tmpfs core/src` | namespace 内目录变空，**ls 都看不到内容** |
-| `.env`、`.env.*` | `ro-bind /dev/null .env*` | 任何读 syscall 返回空 |
-| `.git/**` | `ro-bind-self .git` | 可读（`git log/diff/blame` 正常），任何写 syscall 返回 `EROFS` |
-
-### L4 解决什么 L1+L2+L3 解决不了的问题
-
-| 威胁 | L1+L2+L3（默认 3 层） | L4（追加） |
-|------|---------------------|-----------|
-| Claude `Read`/`Edit`/`Write` 读敏感文件 | ✅ L3 `permissions.deny` | ✅ 重复保护 |
-| Claude `Bash("cat .env")` | ✅ L2 内置 Bash 沙箱 | ✅ 重复保护 |
-| **外部 MCP 服务器**用自己的方式读 `.env` | ⚠️ 取决于 MCP 是否走 L3 | ✅ namespace 内 `/dev/null` 强制 |
-| **未来添加的工具**未走 L3 | ❌ 漏过 | ✅ syscall 级强制 |
-| 让 agent 完全感知不到敏感文件**存在** | ❌ L3 拒绝时仍能 `ls` 看见 | ✅ tmpfs / `/dev/null` 让目录/文件视图为空 |
-| 防 Copilot 读 `.env` | ❌ Copilot L3 不约束文件工具 | ❌ L4 不覆盖 Copilot |
-
-**何时打开 L4**：
-- 装了**外部 MCP 服务器**且不完全信任其权限实现
-- 想做"文件存在性隐藏"（连 `ls` 都看不到敏感目录）
-- 严格威胁建模要求 syscall 级隔离
-
-**何时不要打开 L4**：
-- macOS Docker Desktop / Podman libkrun（VM 不开放 userns，设了直接 hard-fail）
-- 没装外部 MCP、Claude 自带工具够用的常规场景——L1+L2+L3 已足够
-
-### L4 实现细节
-
-链路：
-
-```
-/usr/local/bin/claude (shim, 构建期 COPY)
-  ↓ exec
-.devcontainer/claude-wrapper.sh
-  ↓ source .env, 判定 CLAUDE_USE_BWRAP
-  ├─ 未设/0  → exec claude-real
-  └─ =1      → 加载 bwrap-policy.conf → exec bwrap [...] claude-real
-                                          ↑ tmpfs / ro-bind / ro-bind-self
-```
-
-`bwrap-policy.conf` 支持三种动作：
-
-- `tmpfs <path>` — 空 tmpfs 覆盖目录
-- `ro-bind <src> <path>` — 绑定 `<path>` 到外部源（如 `/dev/null`）
-- `ro-bind-self <path>` — 绑定 `<path>` 到自身，可读不可写
-
-修改策略文件**无需重建镜像**，下次 claude 调用即生效。
-
-> 关于 `.git` 选 `ro-bind-self` 而非 `tmpfs`：agent 常需 `git log/diff/blame` 辅助理解代码。允许读、禁止写（`config`、`hooks`、`HEAD` 都不能改）是兼顾可用性与安全的折中。若 `.git` 含敏感凭据（如 token 写在 `.git/config`），把这行改成 `tmpfs .git` 即可。
->
-> 关于网络：bwrap 自身支持 `--unshare-net`，但本仓库**没启用**——Claude Code CLI 需要访问 `api.anthropic.com`。网络层的边界靠 L1（容器）和 L2（Claude 内置代理），不靠 L4。
+如果未来不需要从工作区 `.env` 加载认证，也可以把这层 wrapper 合并进镜像 shim；这不会影响 L1-L3 模型。
 
 ## 架构图
 
-```
-┌──────────────────────────────────────────────────────────┐
-│ 宿主机 (Host)                                            │
-│  └─ VS Code + Dev Containers → Docker/Podman             │
-│                          ↓                               │
-│ ┌────────────────────────────────────────────────────┐   │
-│ │ L1 容器层：--cap-add=SYS_ADMIN                       │   │
-│ │             --security-opt=apparmor=unconfined      │   │
-│ │             以 devuser (UID 1000) 运行              │   │
-│ │                                                     │   │
-│ │  ┌── GitHub Copilot Agent ────────────────────┐    │   │
-│ │  │  VS Code 扩展进程                            │    │   │
-│ │  │   L2: chat.agent.sandbox.*                  │    │   │
-│ │  │       (扩展进程级，仅 run_in_terminal)        │    │   │
-│ │  │   L3: chat.agent.sandbox.fileSystem.*       │    │   │
-│ │  │       (仅约束 run_in_terminal,              │    │   │
-│ │  │        readFile/grepSearch 等绕过)          │    │   │
-│ │  │   L4: ✗ 不适用                              │    │   │
-│ │  └────────────────────────────────────────────┘    │   │
-│ │                                                     │   │
-│ │  ┌── Claude Code CLI ─────────────────────────┐    │   │
-│ │  │  /usr/local/bin/claude (shim)               │    │   │
-│ │  │   ↓ exec                                    │    │   │
-│ │  │  .devcontainer/claude-wrapper.sh            │    │   │
-│ │  │   ↓ 判定 CLAUDE_USE_BWRAP                    │    │   │
-│ │  │   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄                   │    │   │
-│ │  │   L4 (可选): bubblewrap 包裹                 │    │   │
-│ │  │     ├── tmpfs        core/src               │    │   │
-│ │  │     ├── ro-bind-self .git (可读不可写)        │    │   │
-│ │  │     └── ro-bind /dev/null .env, .env.*      │    │   │
-│ │  │   ↓                                         │    │   │
-│ │  │  claude-real (via PATH; /usr/bin/ 或 /usr/local/bin/) │ │
-│ │  │   L2: 内置 Bash 沙箱 (bwrap)                 │    │   │
-│ │  │   L3: .claude/settings.json                  │    │   │
-│ │  │       permissions.deny + sandbox.filesystem  │    │   │
-│ │  └────────────────────────────────────────────┘    │   │
-│ └────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────┘
+```text
+Host
+  -> VS Code + Dev Containers
+      -> Docker/Podman container (L1)
+          - devuser
+          - limited host mounts
+          - bwrap/socat installed for Claude L2
+
+          GitHub Copilot Agent
+            L2: VS Code extension terminal sandbox
+            L3: terminal sandbox rules only; built-in file tools can bypass
+
+          Claude Code CLI
+            /usr/local/bin/claude -> .devcontainer/claude-wrapper.sh -> claude-real
+            L2: built-in Bash sandbox via bwrap when probe passes
+            L3: .claude/settings.json permissions and sandbox rules
 ```
 
 ## 项目结构
 
-```
+```text
 core/
-├── src/        # 源码（L3 deny + L4 tmpfs 覆盖）
-└── include/    # 头文件（可读写）
-demo/           # 可执行程序
+├── src/        # 示例敏感源码，Claude L3 deny
+└── include/    # 示例公开头文件
+demo/           # 示例可执行程序
 .claude/
-└── settings.json         # L3：Claude permissions.deny + L2：Claude 内置 Bash 沙箱配置
+└── settings.json         # Claude L3 permissions + L2 Bash sandbox config
 .vscode/
-└── settings.json         # L2 + L3：Copilot 终端沙箱与 deny 规则
+└── settings.json         # Copilot terminal sandbox and network settings
 .devcontainer/
-├── devcontainer.json     # L1：容器配置（runArgs、cap、apparmor、mounts）
-├── bwrap-policy.conf     # L4：bubblewrap 路径策略
-├── setup.sh              # 容器创建期检查（信息提示，不再 hard-fail）
-├── claude-shim.sh        # 镜像构建期植入 /usr/local/bin/claude
-└── claude-wrapper.sh     # 判定 CLAUDE_USE_BWRAP 并选择 L4 路径
+├── devcontainer.json     # L1 container config
+├── setup.sh              # environment checks and L1-L3 status summary
+├── claude-shim.sh        # image-level /usr/local/bin/claude shim
+└── claude-wrapper.sh     # lightweight launcher, not an outer sandbox
 images/
-└── Dockerfile            # L1 镜像构建（bubblewrap setuid、devuser、Node、Claude CLI）
-.env.example              # 环境变量模板（含 CLAUDE_USE_BWRAP 注释）
+└── Dockerfile            # image build: tools, devuser, Claude CLI, bwrap/socat
+.env.example              # credential template
 ```
 
 ## 运行身份：devuser（非 root）
 
-容器内 agent 一律以非特权 `devuser`（UID 1000）运行，这是 L1 的一部分。原因：
+容器内 agent 一律以非特权 `devuser` 运行，这是 L1 的一部分。
 
-- **限制误操作爆炸半径**：root 下一条危险命令可能毁掉容器并污染宿主挂载目录；非 root 把破坏面限制在 devuser 家目录与可写工作区
-- **容器逃逸防御纵深**：root-in-container 遇到内核漏洞时往往等价于 root-on-host，非 root 多一层缓冲
-- **文件权限对齐宿主**：`devcontainer.json` 的 `updateRemoteUserUID: true` 让 devuser UID 在首次 attach 时自动对齐宿主用户
-- **匹配工具链假设**：`npm`、`pip` 等在 root 下要么警告要么拒绝
+原因：
 
-### 设计取舍
+- 限制误操作影响面
+- 避免 root-in-container 带来的额外风险
+- 配合 `updateRemoteUserUID: true` 尽量对齐宿主文件权限
+- 匹配 `npm`、`pip` 等工具链的常规使用方式
 
-| 决策 | 说明 |
-|------|------|
-| 不安装 `sudo` | 最小信任面。需要新增系统包请改 Dockerfile 重建镜像 |
-| `claude` shim 在镜像构建期植入 | 避免运行时切换权限。`/usr/local/bin/claude` 是构建期 COPY 的 shim，工作区里的 `claude-wrapper.sh` 可热改 |
-| devuser UID/GID 默认走宿主对齐（见下） | 让宿主创建的文件在容器里归属正确，VS Code 编辑器保存不报权限错 |
-| 不挂 `~/.ssh`、`~/.gitconfig` 等宿主凭据 | 这是 L1 的一部分，避免凭据穿透 |
+### devuser UID/GID 对齐
 
-### devuser UID/GID 对齐：三条路径
+工作区是宿主目录 bind mount，文件归属由宿主决定。如果容器内 devuser 的 UID 与宿主不一致，VS Code 保存文件可能遇到 `EACCES`。
 
-**核心问题**：工作区是宿主目录的 bind mount，文件归属由宿主决定（Mac 一般 UID 501、Linux 一般 1000）。如果容器内 devuser 的 UID 与之不一致，VS Code 用 devuser 身份保存 `.claude/settings.json` 等仓库内文件时会撞 `EACCES`。
+本仓库提供两条默认路径，任一生效即可：
 
-本仓库提供三条对齐路径，三者**叠加生效**（其中任一成功，问题就解决）：
+| 路径 | 机制 | 说明 |
+|------|------|------|
+| `updateRemoteUserUID` | Dev Containers attach 时改 devuser UID | Linux/WSL2 上通常稳定 |
+| `HOST_UID` / `HOST_GID` | 构建期显式传 UID/GID | 需要从继承 env 的终端启动 VS Code |
 
-#### 路径 1（默认，最稳）：`initializeCommand` 放宽文件 mode
+Windows 主机没有 `chmod`，因此不在 `initializeCommand` 中执行宿主侧 chmod。若纯 Linux/macOS 主机仍遇到 UID 不匹配导致的写入问题，可以在宿主终端手动执行 `chmod -R o+rwX .` 作为临时兜底；它会放宽工作区权限，不建议作为默认配置。
 
-`devcontainer.json` 的 `initializeCommand` 在每次 attach 前由**宿主 shell** 执行：
+验证命令：
 
 ```bash
-chmod -R o+rwX . 2>/dev/null || true
+id
+ls -la .claude/settings.json
+echo "" >> .claude/settings.json
 ```
 
-效果：让工作区所有文件对 "others" 也可写、目录可遍历。容器里的 devuser 无论 UID 是多少都能写。
-
-- **优点**：100% 可靠，跟 UID/GID/shell env/VS Code 启动方式全都解耦
-- **代价**：工作区文件 mode 变成 `666`/`777`（你在 `ls -la` 里能看到 `-rw-rw-rw-`）。对单用户开发机不构成问题；多用户共享宿主时需自己评估
-- **是否影响 AI agent 隔离？不**：L3 deny 规则（`Edit(./.claude/settings.json)` 等）独立于文件 mode 生效，**人类放开，AI 仍受限**
-
-如果你不需要这条路径，把 `devcontainer.json` 里的 `initializeCommand` 删掉即可。
-
-#### 路径 2：依赖 `updateRemoteUserUID`
-
-`devcontainer.json` 设 `"updateRemoteUserUID": true`，Dev Containers 扩展会在 attach 时检测宿主用户 UID 并把容器内 devuser 改成同样 UID。在多数 Linux/WSL2 上稳定，但在 macOS Docker Desktop 的 VirtioFS / gRPC FUSE 文件共享层上偶尔不生效。
-
-#### 路径 3：显式 `HOST_UID` / `HOST_GID`（构建期对齐）
-
-`devcontainer.json` 的 build args 配置为读 `${localEnv:HOST_UID:1000}`：
-
-- 如果宿主环境里设置了 `HOST_UID` / `HOST_GID`，镜像构建期 devuser 就直接以该 UID/GID 建立
-- 如果未设置，回落到 1000
-
-**启用步骤**：
-
-```bash
-# 1) 把这两行加到你的 shell profile（~/.zshrc 或 ~/.bashrc）
-export HOST_UID="$(id -u)"
-export HOST_GID="$(id -g)"
-
-# 2) 让当前 shell 立刻生效
-source ~/.zshrc
-
-# 3) 必须**完全退出** VS Code（Cmd+Q）后从该终端启动；GUI 启动不会继承 env var
-code .
-
-# 4) 在 VS Code 里 "Dev Containers: Rebuild Container (Without Cache)"
-```
-
-> **macOS GUI 启动陷阱**：Finder/Dock 启动 VS Code 时不读 shell profile，`HOST_UID` 是空，路径 3 失效。所以建议先把路径 1 留着兜底，再尝试路径 3。
-
-#### 离线构建（路径 3 配套）
-
-`Makefile` 默认就用 `$(shell id -u)` 自动检测：
-
-```bash
-make image           # 自动 UID/GID 对齐
-make print-uid       # 看一下会用的 UID/GID
-make image USER_UID=1000 USER_GID=1000   # 强制覆盖
-```
-
-#### 验证（在容器内 VS Code 终端跑）
-
-```bash
-id                                # 看 devuser 实际 UID
-ls -la .claude/settings.json      # 看文件权限和归属
-echo "" >> .claude/settings.json  # 实测能否写
-```
-
-`echo` 成功就 OK，不用纠结 UID 是不是真的对齐——三条路径只要任一条生效就够。
-
-### 何时会感到不便
-
-- `apt install` 临时工具 → 改 Dockerfile 重建镜像
-- 绑定 80/443 端口 → 用 1024 以上端口，或在镜像里 `setcap`
-- L4 开启时 `.git` 写操作 → bwrap ro-bind-self 拦截，需从宿主或非 sandboxed shell 操作
+`echo` 成功即可，不必纠结具体是哪条路径生效。
 
 ## 运维与排错
 
-### 容器运行时：Docker vs Podman
+### 容器运行时
 
 | 功能 | Docker | Podman |
 |------|--------|--------|
-| `--cap-add=SYS_ADMIN` | ✅ | ✅ |
-| `--security-opt=label=disable` | ✅（忽略） | ✅（SELinux） |
-| `--security-opt=apparmor=unconfined` | ✅ | ✅ |
-| Rootless 模式 | 需配置 rootless-kit | 原生支持 |
-| 守护进程 | 需要 dockerd | 无需 |
-| Socket 路径 | `/var/run/docker.sock` | `$XDG_RUNTIME_DIR/podman/podman.sock` |
-
-**配置 VS Code 使用 Podman：**
-
-```json
-// VS Code settings.json
-{
-  "dev.containers.dockerPath": "podman"
-}
-```
+| `--cap-add=SYS_ADMIN` | 支持 | 支持 |
+| `--security-opt=label=disable` | 通常忽略 | SELinux 环境有效 |
+| `--security-opt=apparmor=unconfined` | 支持 | 支持 |
+| Rootless 模式 | 需额外配置 | 原生支持 |
 
 ### 故障排查
 
-| 问题 | 所属层 | 原因与解决 |
+| 问题 | 所属层 | 原因与处理 |
 |------|-------|-----------|
-| `claude-wrapper: CLAUDE_USE_BWRAP=1 but bwrap cannot create user namespaces` | L4 | 当前 VM 不支持 userns（典型 macOS Docker Desktop）。删除或注释 `.env` 里的 `CLAUDE_USE_BWRAP`，或迁到 Linux/WSL2。L1+L2+L3 仍正常 |
-| `claude-wrapper: CLAUDE_USE_BWRAP=1 but bwrap is not installed` | L4 | 镜像构建异常。重建镜像；检查 Dockerfile 是否被改坏 |
-| `bwrap: permission denied`（Claude 内置 sandbox 报） | L2 | 容器缺 SYS_ADMIN。检查 `devcontainer.json` runArgs 含 `--cap-add=SYS_ADMIN` |
-| `bwrap: setting up uid map: Permission denied`（Ubuntu 24.04+ 宿主） | L2 | 宿主 `kernel.apparmor_restrict_unprivileged_userns=1`。本仓库已通过 ① Dockerfile 给 bwrap 加 setuid，② runArgs 加 `--security-opt=apparmor=unconfined` 规避；若仍失败，宿主侧 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` 验证 |
-| Claude 内置 sandbox `Bubblewrap fails to start inside a container` | L2 | 嵌套 bwrap 无法挂载新 `/proc`。`.claude/settings.json` 的 `sandbox` 块加 `"enableWeakerNestedSandbox": true` |
-| Copilot 仍能读 `.env` | L3（Copilot） | **设计上的预期行为**：Copilot 的 L3 不约束 `readFile` 等内置工具。要防 Copilot 读，唯一可靠手段是 L1（不挂载） |
-| VS Code 编辑器人工保存仓库文件失败、报 `EACCES` / 权限错误 | L1 UID 对齐 | 容器内 devuser 的 UID 与宿主用户 UID 不一致。默认情况下 `devcontainer.json` 的 `initializeCommand` 会 `chmod -R o+rwX .` 自动绕过 UID 问题——如果你删了这条 initializeCommand 或它没运行（旧容器未 Rebuild），就会撞这个错。**修复**：`Dev Containers: Rebuild Container Without Cache`。深入修复见 ["devuser UID/GID 对齐：三条路径"](#devuser-uidgid-对齐三条路径)|
-| `.git` 写操作报 Read-only file system | L4 | 仅在 `CLAUDE_USE_BWRAP=1` 时发生，是 ro-bind-self 拦截。需要写 `.git` 从宿主或非 sandboxed shell 操作 |
-| `claude: command not found` | L1 | 镜像构建未完成。检查容器构建日志 |
-| `claude: WORKSPACE_ROOT is not set` | L4 | shim 在非 devcontainer 环境被调用。在 shell 里手动 `export WORKSPACE_ROOT=$(pwd)` |
-| SELinux 阻止访问 | L1 | Fedora/RHEL/CentOS 的 SELinux。确认 `--security-opt=label=disable` 已配置 |
+| `L2 Claude bwrap: degraded` | L2 | 当前 VM/容器运行时阻止 bwrap 所需 namespace/capability 操作。Claude 仍可用，但 Bash 子进程没有 bwrap 隔离 |
+| `bwrap: capset failed: Operation not permitted` | L2 | 常见于 Windows/WSL2/Docker Desktop，即使 `docker inspect` 显示 `seccomp=unconfined` 也可能发生。推荐接受 L2 降级，不为此单独维护 WSL2 原生 Docker |
+| `bwrap: setting up uid map: Permission denied` | L2 | 宿主或容器运行时限制 user namespace。可用 `bwrap --die-with-parent --bind / / --true` 验证 |
+| Claude 内置 sandbox 提示 `Bubblewrap fails to start inside a container` | L2 | 嵌套 bwrap 环境不兼容；本仓库已在 `.claude/settings.json` 设置 `enableWeakerNestedSandbox` |
+| Copilot 仍能读 `.env` | L3（Copilot） | 预期行为：Copilot 内置文件工具不受终端 sandbox 规则约束。要防 Copilot 读，靠 L1 不挂载 |
+| VS Code 保存仓库文件报 `EACCES` | L1 UID 对齐 | 旧容器或 UID 不匹配。重新 Rebuild Container，或显式设置 `HOST_UID` / `HOST_GID` 后重建 |
+| `claude: command not found` | L1 | 镜像构建未完成或 PATH 异常。重建容器 |
+| `claude: WORKSPACE_ROOT is not set` | launcher | 在非 devcontainer 环境调用 shim。手动 `export WORKSPACE_ROOT=$(pwd)`，或直接运行 `claude-real` |
 
 ### 诊断命令
 
-> 以下命令均**在容器内执行**（VS Code 终端或 `docker exec -it <container> bash`）。在宿主 shell 跑这些是无意义的。
+以下命令均在容器内执行：
 
 ```bash
 # L1 身份与挂载
-id                                          # 应为 devuser，UID 与宿主对齐
+id
 echo "WORKSPACE_ROOT=${WORKSPACE_ROOT:-unset}"
-mount | grep -E "workspaces|/home"          # 看挂载结构
+mount | grep -E "workspaces|/home"
 
-# L2 / L4 的 bwrap 可用性
+# L2 bwrap 可用性
 bwrap --version
 bwrap --die-with-parent --bind / / --true && echo "bwrap OK" || echo "bwrap FAILED"
+grep -E 'Seccomp|NoNewPrivs|CapEff|CapBnd' /proc/self/status
 
-# L4 开关
-echo "CLAUDE_USE_BWRAP=${CLAUDE_USE_BWRAP:-(unset, L4 disabled)}"
-
-# Shim / 真二进制布局
+# Claude launcher / 真二进制布局
 ls -l "$(command -v claude)" "$(command -v claude-real)"
-head -1 "$(command -v claude)"              # 应为 #!/usr/bin/env bash (shim)
-# shim 一般在 /usr/local/bin/claude；claude-real 在 npm prefix 下（通常 /usr/bin/）
-
-# 认证
-echo "ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:+set}"
-
-# 真正的 L2/L3/L4 隔离测试需要从 agent 内部调用（外部 shell 不受任何 agent 沙箱约束）
-```
-
-### 重建沙箱
-
-shim 与 `claude-real` 在镜像构建期植入，不存在"运行时安装失败"状态。行为异常时：
-
-```bash
-# 1) 验证二进制布局（路径由 npm prefix 决定）
-ls -l "$(command -v claude)" "$(command -v claude-real)"
+head -1 "$(command -v claude)"
 claude-real --version
 
-# 2) 验证 L2/L4 依赖的 bwrap
-bwrap --die-with-parent --bind / / --true && echo OK
-
-# 3) 都没问题但行为不对 → 从宿主重建镜像
-#    VS Code: Dev Containers: Rebuild Container
+# 认证变量是否进入容器
+echo "ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:+set}"
 ```
 
-容器内 devuser **不具备 sudo 权限**（最小信任面）。新增系统包请改 Dockerfile 后重建。
+真正的 L2/L3 隔离测试需要从 agent 工具内部触发；普通人工终端不受 agent 的 L3 工具入口约束。
 
 ## 版本信息
 
@@ -481,5 +286,18 @@ bwrap --die-with-parent --bind / / --true && echo OK
 | Claude Code CLI | 2.1.161 | 锁定版本，确保一致性 |
 | Ubuntu | 24.04 | LTS 基础镜像 |
 | Node.js | 22.x | LTS |
-| bubblewrap | 系统 package | Ubuntu 24.04 版本，setuid root |
-| socat | 系统 package | Claude 内置 Bash 沙箱网络代理依赖 |
+| bubblewrap | 系统 package | Claude 内置 L2 Bash 沙箱依赖 |
+| socat | 系统 package | Claude 内置 L2 网络代理依赖 |
+
+## 关于旧 L4 的取舍
+
+我们尝试过旧版 L4：用外层 bubblewrap 包住整个 `claude` 进程，再通过 `tmpfs`、`ro-bind`、`ro-bind-self` 做路径级 syscall 隔离。它理论上能补 MCP 工具、未来未知工具、文件存在性隐藏等空白。
+
+实际验证后决定放弃，原因是 ROI 太低：
+
+- Windows/WSL2/Docker Desktop 上，即使 `docker inspect` 显示 `SYS_ADMIN`、`apparmor=unconfined`、`seccomp=unconfined` 已下发，bwrap 仍可能在 `capset()` 阶段失败
+- Claude 自带 L2 Bash 沙箱也依赖 bwrap；外层 L4 与 L2 会踩同一类运行时限制，并不能解决 Windows Docker Desktop 的核心问题
+- L4 只覆盖 Claude 进程，不覆盖 Copilot 的 VS Code 扩展进程；对 Copilot 的敏感数据保护仍然必须靠 L1
+- 为了 L4 迁移到 WSL2 原生 Docker Engine、开启 `--privileged` 或调整宿主内核策略，维护成本超过它带来的额外收益
+
+所以本项目保留清晰、可维护的 L1-L3 模型：L1 作为可靠边界，L2 按探针结果启用或降级，L3 作为 agent 工具入口约束。对真正敏感的数据，结论保持不变：不要挂载进容器。

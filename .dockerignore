@@ -30,4 +30,3 @@ docs/
 .devcontainer/devcontainer.json
 .devcontainer/setup.sh
 .devcontainer/claude-wrapper.sh
-.devcontainer/bwrap-policy.conf

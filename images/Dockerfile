@@ -69,9 +69,8 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.161 \
 	&& mv "$CLAUDE_BIN" "$(dirname "$CLAUDE_BIN")/claude-real" \
 	&& claude-real --version
 
-# Install the claude shim. It defers to the workspace wrapper so that the
-# bwrap logic (in .devcontainer/claude-wrapper.sh) can be edited without
-# rebuilding the image.
+# Install the claude shim. It defers to the workspace launcher so that
+# runtime env loading can be edited without rebuilding the image.
 COPY .devcontainer/claude-shim.sh /usr/local/bin/claude
 RUN chmod +x /usr/local/bin/claude
 
