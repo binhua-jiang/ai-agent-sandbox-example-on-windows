@@ -89,7 +89,7 @@ Claude Code CLI 在 Linux 上会尝试用 bubblewrap 包裹 Bash 工具调用及
 bwrap --die-with-parent --bind / / --true
 ```
 
-如果探针失败，`setup.sh` 会打印 `L2 Claude bwrap: degraded`。这在 macOS Podman Desktop、Podman libkrun，以及某些 Windows/WSL2/Podman Desktop 组合里都可能发生。`.claude/settings.json` 设置了 `failIfUnavailable: false`，所以 Claude 仍可使用，但 Bash 子进程不再拥有 bwrap 隔离。
+如果探针失败，`setup.sh` 会打印 `L2 Claude bwrap: degraded`。这在 macOS Podman Desktop、Podman libkrun，以及某些 Windows/WSL2/Podman Desktop 组合里都可能发生。 Windows/WSL2/Podman Desktop 组合里都可能发生。`.claude/settings.json` 设置了 `failIfUnavailable: false`，所以 Claude 仍可使用，但 Bash 子进程不再拥有 bwrap 隔离。
 
 ### GitHub Copilot Agent
 
