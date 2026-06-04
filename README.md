@@ -1,4 +1,4 @@
-# Windows 的 AI Agent 安全沙箱配置案例
+# Windows下AI Agent安全沙箱配置案例
 
 在 Docker/Podman 容器中运行 **GitHub Copilot Agent** 与 **Claude Code CLI** 的沙箱隔离示例。
 
