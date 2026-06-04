@@ -37,24 +37,31 @@ echo "  real bin:  /usr/local/bin/claude-real"
 /usr/local/bin/claude-real --version
 
 echo "Checking bwrap..."
+# Setup never hard-fails on bwrap problems: the dev container must remain
+# usable for general development even when bwrap isolation is unavailable
+# (typical on macOS Docker Desktop / Podman libkrun, where the Linux VM
+# does not expose user namespaces). The claude wrapper itself will detect
+# the same condition at invocation time and either degrade with a loud
+# warning, or hard-fail when CLAUDE_SANDBOX_STRICT=1.
 if ! command -v bwrap >/dev/null 2>&1; then
-    echo "bwrap not available; aborting setup." >&2
-    exit 1
-fi
-bwrap --version
-# Verify bwrap can actually create user namespaces in this container.
-# On macOS Docker Desktop / Podman libkrun this often fails even with
-# CAP_SYS_ADMIN; in that case the sandbox is unusable and we hard-fail.
-if bwrap_test_output="$(bwrap --die-with-parent --bind / / --true 2>&1)"; then
-    echo "bwrap namespace test: OK"
+    echo "WARNING: bwrap not installed; sandbox layer 1 (namespace isolation) will be UNAVAILABLE." >&2
+    echo "   Claude will run with only settings.json permission rules (bypassable)." >&2
+    echo "   To enforce strict mode and refuse to run, set CLAUDE_SANDBOX_STRICT=1 in .env" >&2
 else
-    echo "bwrap namespace test: FAILED" >&2
-    if [[ -n "$bwrap_test_output" ]]; then
-        echo "   ${bwrap_test_output}" >&2
+    bwrap --version
+    if bwrap_test_output="$(bwrap --die-with-parent --bind / / --true 2>&1)"; then
+        echo "bwrap namespace test: OK"
+    else
+        echo "WARNING: bwrap namespace test FAILED" >&2
+        if [[ -n "$bwrap_test_output" ]]; then
+            echo "   ${bwrap_test_output}" >&2
+        fi
+        echo "   This VM does not allow bwrap to create user namespaces" >&2
+        echo "   (common on macOS Docker Desktop / Podman libkrun)." >&2
+        echo "   Sandbox layer 1 (namespace isolation) will be UNAVAILABLE;" >&2
+        echo "   Claude will run with only settings.json permission rules (bypassable)." >&2
+        echo "   To enforce strict mode and refuse to run, set CLAUDE_SANDBOX_STRICT=1 in .env" >&2
     fi
-    echo "   Bubblewrap namespace isolation is required; aborting setup." >&2
-    echo "   On macOS this is a known limitation of the Docker/Podman VM." >&2
-    exit 1
 fi
 
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]] || [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then

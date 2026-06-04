@@ -29,17 +29,53 @@ if [[ ! -x "$REAL_CLAUDE" ]]; then
     exit 1
 fi
 
-# Bubblewrap is mandatory. If it is unavailable, refuse to run rather than
-# silently dropping the namespace isolation layer.
+# Bwrap availability check.
+# Default behaviour: degrade with a loud, repeated warning when bwrap cannot
+# create user namespaces (common on macOS Docker Desktop / Podman libkrun).
+# This keeps the dev container usable across platforms.
+# Strict mode: when CLAUDE_SANDBOX_STRICT=1, refuse to run if bwrap is not
+# fully functional. Intended for deployments that require namespace isolation
+# as a security gate.
+BWRAP_OK=false
+BWRAP_FAIL_REASON=""
 if ! command -v bwrap >/dev/null 2>&1; then
-    echo "claude-wrapper: bwrap not installed; refusing to run without sandbox." >&2
-    exit 1
+    BWRAP_FAIL_REASON="bwrap binary not installed in the image"
+elif ! bwrap --die-with-parent --bind / / --true 2>/dev/null; then
+    BWRAP_FAIL_REASON="bwrap cannot create user namespaces in this VM (no userns support)"
+else
+    BWRAP_OK=true
 fi
-if ! bwrap --die-with-parent --bind / / --true 2>/dev/null; then
-    echo "claude-wrapper: bwrap cannot create namespaces in this environment." >&2
-    echo "  Likely the container/VM lacks user-namespace support (common on macOS" >&2
-    echo "  Docker Desktop / Podman libkrun). Refusing to run without sandbox." >&2
-    exit 1
+
+if [[ "$BWRAP_OK" == "false" ]]; then
+    if [[ "${CLAUDE_SANDBOX_STRICT:-0}" == "1" ]]; then
+        echo "claude-wrapper: CLAUDE_SANDBOX_STRICT=1 set and bwrap unavailable." >&2
+        echo "  Reason: $BWRAP_FAIL_REASON" >&2
+        echo "  Refusing to run." >&2
+        exit 1
+    fi
+    # Degraded mode: warn loudly on every invocation, log to file, then
+    # exec the real claude without bwrap. Application-level deny rules in
+    # .claude/settings.json are still in effect, but are bypassable.
+    cat >&2 <<EOF
+================================================================================
+  WARNING: bwrap sandbox UNAVAILABLE — running with REDUCED isolation.
+  Reason: $BWRAP_FAIL_REASON
+  Disabled protections:
+    - bubblewrap namespace isolation
+    - core/src tmpfs hiding
+    - .env / .env.* /dev/null masking
+    - .git ro-bind-self write protection
+  Still active:
+    - .claude/settings.json permission rules (BYPASSABLE)
+    - Container-level filesystem boundary (host paths not mounted)
+  To enforce strict mode and refuse to run instead of degrading,
+  set CLAUDE_SANDBOX_STRICT=1 in your shell or .env file.
+================================================================================
+EOF
+    mkdir -p "$WORKSPACE_ROOT/.claude" 2>/dev/null || true
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] claude invoked in degraded mode: $BWRAP_FAIL_REASON" \
+        >> "$WORKSPACE_ROOT/.claude/sandbox.log" 2>/dev/null || true
+    exec "$REAL_CLAUDE" "$@"
 fi
 
 # Load bubblewrap policy from a simple config file.

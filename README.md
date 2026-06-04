@@ -20,7 +20,7 @@
 - **Linux 内核必须支持 user namespace**：
   - Linux 宿主：原生支持（绝大多数发行版默认开启）
   - Windows：必须走 WSL2 + Docker/Podman
-  - **macOS：Docker Desktop / Podman libkrun 提供的 Linux VM 通常不开放 user namespace，即使加了 `CAP_SYS_ADMIN` 也跑不起来 bwrap**。本仓库的 `setup.sh` 检测到 bwrap 不能创建 namespace 时会直接中止初始化，避免静默降级。详见 [故障排查](#故障排查)。
+  - **macOS：Docker Desktop / Podman libkrun 提供的 Linux VM 通常不开放 user namespace，即使加了 `CAP_SYS_ADMIN` 也跑不起来 bwrap**。本仓库采用**降级模式**：bwrap 不可用时容器仍可正常用于一般开发，Claude 会带着大字警告以"无 bwrap 隔离"运行（只剩应用层规则）。如需拒绝降级，在 `.env` 设置 `CLAUDE_SANDBOX_STRICT=1`，此时 Claude 在 bwrap 不可用时直接拒绝运行。详见 [故障排查](#故障排查)。
   - **Ubuntu 24.04+ 宿主**：宿主默认开启 `kernel.apparmor_restrict_unprivileged_userns=1`，禁止非特权 user namespace。本仓库已在镜像层规避（setuid bwrap）+ 容器层规避（`apparmor=unconfined`），用户**不需要**改宿主配置
 
 ### 步骤
@@ -31,6 +31,7 @@
    ANTHROPIC_AUTH_TOKEN=your-key      # 或 ANTHROPIC_API_KEY
    ANTHROPIC_BASE_URL=your-api-base-url  # 可选，用于代理/网关
    ANTHROPIC_MODEL=your-model-name    # 可选，强制指定模型
+   # CLAUDE_SANDBOX_STRICT=1          # 可选，bwrap 不可用时拒绝运行而非降级
    ```
 
 2. **在 VS Code 中打开容器**：执行 "Dev Containers: Reopen in Container"
@@ -206,6 +207,33 @@ images/
 - 想绑定 80/443 端口 → 用 1024 以上端口，或在镜像里 `setcap`
 - `.git` 写操作（commit/push）→ 在 bwrap 内拦截（见上文）；从宿主或非 sandboxed shell 操作
 
+### 沙箱可用性与降级模式
+
+bwrap 依赖宿主 Linux 内核的 user namespace 支持。这个能力**不是所有环境都具备**——macOS 上的 Docker Desktop / Podman libkrun 提供的 Linux VM 默认不开放 userns，即便容器侧加了 `CAP_SYS_ADMIN` 和 `apparmor=unconfined` 也无济于事。如果硬要求 bwrap 可用，macOS 用户根本进不了这个 devcontainer。
+
+为兼容性与安全性两者兼顾，本仓库采用**默认降级 + 大字警告 + 可选严格**的策略，与 Claude Code 内置 sandbox 的 [`failIfUnavailable`](https://code.claude.com/docs/en/sandboxing) 设计一致：
+
+| 模式 | 触发 | 行为 |
+|------|------|------|
+| **正常** | bwrap 可创建 namespace | wrapper 走完整 bwrap 策略，所有沙箱层 1 保护生效 |
+| **降级**（默认） | bwrap 不可用，未设 `CLAUDE_SANDBOX_STRICT` | wrapper **每次调用**都打印大字警告，列出失效的保护项，写入 `.claude/sandbox.log`，然后无 bwrap 运行 claude-real |
+| **严格** | `CLAUDE_SANDBOX_STRICT=1` 且 bwrap 不可用 | wrapper 拒绝运行并退出 |
+
+**降级模式下还剩什么保护**：
+
+| 保护 | 降级模式下 |
+|------|---------|
+| 容器层（宿主目录不挂载） | ✅ 仍然生效——这是真正的边界 |
+| `.claude/settings.json` 权限规则 | ✅ 生效但**可被绕过**（任何不走该规则的工具或 syscall 都不受约束） |
+| bwrap tmpfs / ro-bind / ro-bind-self | ❌ 完全失效 |
+
+**实操建议：**
+- **macOS 用户**：默认降级即可，警告自然提醒你不要在 macOS 上做敏感开发
+- **Linux/WSL2 用户**：bwrap 通常能跑，无需设置；若硬要保证沙箱永远生效，在 `.env` 加 `CLAUDE_SANDBOX_STRICT=1` 把环境异常变为可见的失败
+- **CI / 生产 agent 部署**：强烈建议 `CLAUDE_SANDBOX_STRICT=1`
+
+**审计降级使用情况**：`.claude/sandbox.log` 记录所有降级调用的时间戳和原因，定期 review 这个文件可以发现"以为有沙箱但实际没有"的情况。
+
 ## 运维与排错
 
 ### 容器运行时
@@ -251,7 +279,8 @@ podman info
 
 | 问题 | 可能原因 | 解决方案 |
 |------|----------|----------|
-| `bwrap namespace test: FAILED`（setup 中止） | 容器/VM 不支持 user namespace | Linux 宿主：检查 `sysctl kernel.unprivileged_userns_clone`。Windows：必须用 WSL2 而不是原生 Hyper-V。macOS：Docker Desktop / Podman libkrun 的 VM 通常不支持，没有官方解；可考虑在 Linux 服务器或 Linux 虚拟机里跑此沙箱 |
+| `bwrap namespace test: FAILED`（setup 警告但继续） | 容器/VM 不支持 user namespace | setup 不再中止，Claude 会在**降级模式**下运行（只剩 settings.json 权限规则，可绕过）。Linux 宿主：检查 `sysctl kernel.unprivileged_userns_clone`。Windows：必须 WSL2 而不是 Hyper-V。macOS：Docker Desktop / Podman libkrun 的 VM 通常不支持，**降级模式下也能正常做开发，但 Claude 沙箱隔离失效**。需要严格模式拒绝降级，设 `CLAUDE_SANDBOX_STRICT=1` |
+| `WARNING: bwrap sandbox UNAVAILABLE — running with REDUCED isolation` | wrapper 检测到 bwrap 不可用，进入降级模式 | 这是设计行为。如不能接受降级，在 `.env` 加 `CLAUDE_SANDBOX_STRICT=1`，此时 claude 调用会拒绝运行而不是降级 |
 | `bwrap: permission denied` | 容器缺少 SYS_ADMIN 能力 | 检查 `devcontainer.json` 的 `runArgs` 包含 `--cap-add=SYS_ADMIN` |
 | `bwrap: setting up uid map: Permission denied` / 无法创建 user namespace（Ubuntu 24.04+ 宿主） | 宿主开启了 `kernel.apparmor_restrict_unprivileged_userns=1`，AppArmor 阻止非特权 userns | 本仓库已通过两层措施规避：① Dockerfile 给 `/usr/bin/bwrap` 加 setuid 位，让 bwrap 以 root 创建 namespace；② `devcontainer.json` runArgs 加 `--security-opt=apparmor=unconfined`。两者任一生效即可。如仍失败，可在宿主侧 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` 临时验证 |
 | Claude 内置 sandbox `Bubblewrap fails to start inside a container` | 非特权容器内嵌套 bwrap 无法挂载新的 `/proc` | 在 `.claude/settings.json` 的 `sandbox` 块里加 `"enableWeakerNestedSandbox": true`，让内层 bwrap 复用容器现有 `/proc` |
