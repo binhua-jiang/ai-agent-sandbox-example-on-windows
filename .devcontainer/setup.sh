@@ -44,7 +44,7 @@ echo "  real bin:  $claude_real_path"
 echo "Checking bwrap (used by Claude's built-in Bash sandbox)..."
 # bwrap status is informational only. Claude Code's built-in sandbox uses it
 # to isolate Bash subprocesses (L2), configured in .claude/settings.json
-# under "sandbox". Some Docker Desktop backends expose bwrap but still block
+# under "sandbox". Some Podman Desktop backends expose bwrap but still block
 # the namespace/capability operations it needs; in that case L2 degrades.
 BWRAP_USABLE=0
 if ! command -v bwrap >/dev/null 2>&1; then
@@ -54,7 +54,7 @@ elif bwrap_test_output="$(bwrap --die-with-parent --bind / / --true 2>&1)"; then
     BWRAP_USABLE=1
 else
     echo "  bwrap: installed but cannot create user namespaces in this VM"
-    echo "         (common on macOS Docker Desktop / Podman libkrun)."
+    echo "         (common on macOS Podman Desktop / Podman libkrun)."
     echo "         Claude's built-in Bash sandbox (L2) may silently degrade."
     if [[ -n "$bwrap_test_output" ]]; then
         echo "         Test output: ${bwrap_test_output}"

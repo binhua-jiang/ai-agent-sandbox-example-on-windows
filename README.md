@@ -2,7 +2,7 @@
 
 在 Docker/Podman 容器中运行 **GitHub Copilot Agent** 与 **Claude Code CLI** 的沙箱隔离示例。
 
-本项目现在采用 **L1-L3 三层模型**。外层 bwrap（旧 L4）已经移除：它在 Windows/WSL2/Docker Desktop 上 ROI 太低，且会和 Claude Code CLI 自带的 Bash 沙箱踩同一类运行时限制。
+本项目现在采用 **L1-L3 三层模型**。外层 bwrap（旧 L4）已经移除：它在 Windows/WSL2/Podman Desktop 上 ROI 太低，不值得投入。
 
 ## 沙箱 3 层模型总览
 
@@ -15,15 +15,15 @@
 两条关键结论：
 
 1. **L1 是唯一对两个 agent 都平等可靠的强保护**。对必须防 Copilot 或未知工具读取的敏感内容，最可靠手段是 L1 不挂载。
-2. **L2 在 Docker Desktop 上必须按探针结果判断**。Claude 的 L2 依赖 bwrap；如果 `bwrap --die-with-parent --bind / / --true` 失败，Claude Bash 子进程不会获得内核级 bwrap 隔离，此时有效边界收敛为 L1 + L3。
+2. **L2 在 Podman Desktop 上必须按探针结果判断**。Claude 的 L2 依赖 bwrap；如果 `bwrap --die-with-parent --bind / / --true` 失败，Claude Bash 子进程不会获得内核级 bwrap 隔离，此时有效边界收敛为 L1 + L3。
 
 ## 快速开始
 
 ### 前置条件
 
-- Docker 20.10+ 或 Podman 4.0+
+- Podman 4.0+ 或 Docker 20.10+，大企业推荐使用 Podman，因为开源免费
 - VS Code + Dev Containers 扩展
-- Windows 推荐使用 Docker Desktop + WSL2 backend；但请注意，Docker Desktop 可能仍会让 Claude L2 bwrap 降级
+- Windows 推荐使用 Podman Desktop + WSL2 backend；但请注意，Podman Desktop 可能仍会让 Claude L2 bwrap 降级
 
 ### 步骤
 
@@ -61,7 +61,7 @@
 - 工作区目录是唯一被挂载进来的宿主路径；`~/.ssh`、`~/.aws`、`~/.gitconfig` 等宿主凭据不挂载进容器
 - 容器以非特权用户 `devuser` 运行，不是 root
 - 镜像安装 `bubblewrap` 和 `socat`，供 Claude 内置 L2 Bash 沙箱使用
-- `devcontainer.json` 保留 `SYS_ADMIN`、`apparmor=unconfined`、`seccomp=unconfined` 等配置，以尽量放行 Claude L2 bwrap；但 Docker Desktop 运行时仍可能让 bwrap 降级
+- `devcontainer.json` 保留 `SYS_ADMIN`、`apparmor=unconfined`、`seccomp=unconfined` 等配置，以尽量放行 Claude L2 bwrap；但 Podman Desktop 运行时仍可能让 bwrap 降级
 
 为什么 L1 最重要：一旦文件被挂进容器，后续 L2/L3 都属于补充约束；唯一不可绕的事实是“这个路径在容器里根本不存在”。设计敏感数据保护时，第一选择永远是不挂载。
 
@@ -89,7 +89,7 @@ Claude Code CLI 在 Linux 上会尝试用 bubblewrap 包裹 Bash 工具调用及
 bwrap --die-with-parent --bind / / --true
 ```
 
-如果探针失败，`setup.sh` 会打印 `L2 Claude bwrap: degraded`。这在 macOS Docker Desktop、Podman libkrun，以及某些 Windows/WSL2/Docker Desktop 组合里都可能发生。`.claude/settings.json` 设置了 `failIfUnavailable: false`，所以 Claude 仍可使用，但 Bash 子进程不再拥有 bwrap 隔离。
+如果探针失败，`setup.sh` 会打印 `L2 Claude bwrap: degraded`。这在 macOS Podman Desktop、Podman libkrun，以及某些 Windows/WSL2/Podman Desktop 组合里都可能发生。`.claude/settings.json` 设置了 `failIfUnavailable: false`，所以 Claude 仍可使用，但 Bash 子进程不再拥有 bwrap 隔离。
 
 ### GitHub Copilot Agent
 
@@ -103,7 +103,7 @@ Copilot 的 `chat.agent.sandbox.*` 是 VS Code 扩展进程层面的命令拦截
 |------|-----------|------------|
 | 实现 | Linux bubblewrap namespace | VS Code 扩展进程命令拦截 |
 | 覆盖范围 | Bash + 子进程 | 主要是 `run_in_terminal` |
-| 降级风险 | Docker Desktop/VM 可能阻止 bwrap | 不依赖 bwrap |
+| 降级风险 | Podman Desktop/VM 可能阻止 bwrap | 不依赖 bwrap |
 | 安全强度 | active 时较强；degraded 时失去内核隔离 | 较弱，偏自动批准控制 |
 
 ## L3：内置 deny/read/write 规则
@@ -245,7 +245,7 @@ echo "" >> .claude/settings.json
 | 问题 | 所属层 | 原因与处理 |
 |------|-------|-----------|
 | `L2 Claude bwrap: degraded` | L2 | 当前 VM/容器运行时阻止 bwrap 所需 namespace/capability 操作。Claude 仍可用，但 Bash 子进程没有 bwrap 隔离 |
-| `bwrap: capset failed: Operation not permitted` | L2 | 常见于 Windows/WSL2/Docker Desktop，即使 `docker inspect` 显示 `seccomp=unconfined` 也可能发生。推荐接受 L2 降级，不为此单独维护 WSL2 原生 Docker |
+| `bwrap: capset failed: Operation not permitted` | L2 | 常见于 Windows/WSL2/Podman Desktop，即使 `docker inspect` 显示 `seccomp=unconfined` 也可能发生。推荐接受 L2 降级，不为此单独维护 WSL2 原生 Docker |
 | `bwrap: setting up uid map: Permission denied` | L2 | 宿主或容器运行时限制 user namespace。可用 `bwrap --die-with-parent --bind / / --true` 验证 |
 | Claude 内置 sandbox 提示 `Bubblewrap fails to start inside a container` | L2 | 嵌套 bwrap 环境不兼容；本仓库已在 `.claude/settings.json` 设置 `enableWeakerNestedSandbox` |
 | Copilot 仍能读 `.env` | L3（Copilot） | 预期行为：Copilot 内置文件工具不受终端 sandbox 规则约束。要防 Copilot 读，靠 L1 不挂载 |
@@ -295,8 +295,8 @@ echo "ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:+set}"
 
 实际验证后决定放弃，原因是 ROI 太低：
 
-- Windows/WSL2/Docker Desktop 上，即使 `docker inspect` 显示 `SYS_ADMIN`、`apparmor=unconfined`、`seccomp=unconfined` 已下发，bwrap 仍可能在 `capset()` 阶段失败
-- Claude 自带 L2 Bash 沙箱也依赖 bwrap；外层 L4 与 L2 会踩同一类运行时限制，并不能解决 Windows Docker Desktop 的核心问题
+- Windows/WSL2/Podman Desktop 上，即使 `docker inspect` 显示 `SYS_ADMIN`、`apparmor=unconfined`、`seccomp=unconfined` 已下发，bwrap 仍可能在 `capset()` 阶段失败
+- Claude 自带 L2 Bash 沙箱也依赖 bwrap；外层 L4 与 L2 会踩同一类运行时限制，并不能解决 Windows Podman Desktop 的核心问题
 - L4 只覆盖 Claude 进程，不覆盖 Copilot 的 VS Code 扩展进程；对 Copilot 的敏感数据保护仍然必须靠 L1
 - 为了 L4 迁移到 WSL2 原生 Docker Engine、开启 `--privileged` 或调整宿主内核策略，维护成本超过它带来的额外收益
 

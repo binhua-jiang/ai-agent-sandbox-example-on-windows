@@ -15,6 +15,7 @@
         "--security-opt=apparmor=unconfined",
         "--security-opt=seccomp=unconfined",
         "--cap-add=SYS_ADMIN",
+        "--privileged",
         "--env-file",
         "${localWorkspaceFolder}/.env"
     ],
