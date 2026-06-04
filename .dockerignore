@@ -1,0 +1,33 @@
+# .dockerignore — trim Docker build context.
+# Only .devcontainer/claude-shim.sh is COPYed during image build;
+# everything else listed here is workspace-only and not needed.
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Secrets and local agent config
+.env
+.env.*
+.claude/
+.vscode/
+
+# Build artifacts
+build/
+
+# Source code (not needed during image build)
+core/
+demo/
+
+# Workspace tooling not needed during build
+CMakeLists.txt
+Makefile
+*.md
+docs/
+
+# Devcontainer files (Dockerfile only COPYs claude-shim.sh)
+.devcontainer/devcontainer.json
+.devcontainer/setup.sh
+.devcontainer/claude-wrapper.sh
+.devcontainer/bwrap-policy.conf

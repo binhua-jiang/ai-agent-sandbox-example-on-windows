@@ -1,6 +1,6 @@
 # Windows 的 AI Agent 安全沙箱配置案例
 
-在 Docker/Podman 容器中运行 **GitHub Copilot Agent** 与 **Claude Code CLI** 的沙箱隔离示例，支持 Claude Code for VS Code 扩展集成。
+在 Docker/Podman 容器中运行 **GitHub Copilot Agent** 与 **Claude Code CLI** 的沙箱隔离示例。
 
 沙箱采用 **L1–L4 四层模型**：越外层越接近"内核硬隔离"，越内层越是"应用自律"。**每层对两个 agent 的覆盖强度不同**——这是理解整个项目的关键。
 
@@ -43,16 +43,22 @@
    ```
    完整模板见仓库根目录的 `.env.example`。
 
-2. **在 VS Code 中打开容器**：执行 "Dev Containers: Reopen in Container"
+2. **在 VS Code 中打开容器**：执行 "Dev Containers: Reopen in Container"。容器构建期镜像已包含 shim、devuser、bubblewrap setuid 等所有 L1–L4 基础设施。
 
-3. **使用 agent**：容器启动后 Claude Code CLI 和 Copilot Agent 都自动按各自的 L2/L3 规则受约束；直接使用即可
+3. **首次 attach 后**：`setup.sh` 会校验环境（claude/claude-real/bwrap 是否就位）、装 Claude 插件、并在末尾打印 **L1–L4 各层激活状态**——重点看 `L2 Claude bwrap` 是 `✓ active` 还是 `⚠ degraded`，后者意味着当前 VM 不支持 user namespace（macOS 上很常见）。
 
-4. **构建 Demo**（可选）：
+4. **使用 agent**：直接用 Claude Code 或 Copilot 即可。L2/L3 自动按 `.claude/settings.json` 和 `.vscode/settings.json` 的规则约束。
+
+5. **构建 Demo**（可选，由**你（人）**在容器终端运行）：
 
    ```bash
    cmake -S . -B build && cmake --build build
    ./build/demo/demo
    ```
+
+   **不要让 agent 替你运行**：`core/src/` 被 L3 `denyRead` 阻塞，`cmake --build` 会因 gcc 读不到源码而失败——这正是本仓库想展示的"L3 让 agent 看不到敏感源码"的效果。
+
+> **离线构建镜像**（不走 VS Code Dev Containers，例如 CI）：仓库根的 `Makefile` 提供 `make image` 目标，相当于 `docker build -f images/Dockerfile -t ubuntu24-ai-sandbox:latest .`，支持 `CONTAINER_ENGINE=podman` 切换。
 
 ## L1：容器层
 
@@ -84,6 +90,8 @@ Claude Code CLI 在 Linux 上**内部就用 bubblewrap** 包裹每次 `Bash` 工
 - **不覆盖**：`Read`/`Edit`/`Write` 等不通过 shell 的工具——这些走 L3
 - **配置**：`.claude/settings.json` 的 `sandbox` 块（`filesystem.denyRead/denyWrite/allowWrite`、`network.allowedDomains` 等）
 - **依赖**：bubblewrap + socat（镜像已装）、`CAP_SYS_ADMIN`、user namespace 支持
+
+> **macOS 注意**：Claude L2 用的也是 bubblewrap，在 macOS Docker Desktop / Podman libkrun 的 Linux VM 里同样会因为 **VM 不开放 user namespace** 而失败。`.claude/settings.json` 设了 `failIfUnavailable: false`，所以 Claude 会**静默降级**（打印警告 + Bash 子进程不沙箱）。也就是说在 macOS 上，Claude 的真实保护其实是 **L1 + L3**，L2 与 L4 都失效。`setup.sh` 启动时会检测并打印 `L2 Claude bwrap: ⚠ degraded` 提示。
 
 参考：[Claude Code Sandboxing 文档](https://code.claude.com/docs/en/sandboxing)
 
@@ -135,6 +143,8 @@ Copilot 的 `chat.agent.sandbox.*` 是 **VS Code 扩展进程**层面的命令�
 - **生效范围**：仅 `run_in_terminal` 工具
 - **绕过方式**：Copilot 默认调用 `readFile` 而不是 `cat`——天然绕过
 - **配置**：`.vscode/settings.json` 的 `chat.agent.sandbox.fileSystem.*`
+
+> **`.git` 策略不对称的原因**：`.claude/settings.json` 允许读 `.git`（agent 常需 `git log/diff/blame` 辅助理解代码），但 `.vscode/settings.json` 把 `.git/` 写进了 `denyRead`。这是有意的非对称：Copilot 的 L3 既然只能约束终端，那就把"agent 用 `cat .git/config` 看 token"这类**终端层面的尝试**显式拒掉；Copilot 的内置 `readFile` 仍能看到 `.git`，但那已经超出 L3 能管的范围——真正想防 Copilot 读 `.git` 只能靠 L1（不挂载，但 `.git` 必须在仓库内，所以不可行）。
 
 ### L3 强度对比
 
@@ -254,7 +264,7 @@ CLAUDE_USE_BWRAP=1
 │ │  │     ├── ro-bind-self .git (可读不可写)        │    │   │
 │ │  │     └── ro-bind /dev/null .env, .env.*      │    │   │
 │ │  │   ↓                                         │    │   │
-│ │  │  claude-real (/usr/local/bin/claude-real)   │    │   │
+│ │  │  claude-real (via PATH; /usr/bin/ 或 /usr/local/bin/) │ │
 │ │  │   L2: 内置 Bash 沙箱 (bwrap)                 │    │   │
 │ │  │   L3: .claude/settings.json                  │    │   │
 │ │  │       permissions.deny + sandbox.filesystem  │    │   │
@@ -300,8 +310,79 @@ images/
 |------|------|
 | 不安装 `sudo` | 最小信任面。需要新增系统包请改 Dockerfile 重建镜像 |
 | `claude` shim 在镜像构建期植入 | 避免运行时切换权限。`/usr/local/bin/claude` 是构建期 COPY 的 shim，工作区里的 `claude-wrapper.sh` 可热改 |
-| UID/GID 固定为 1000 | Ubuntu 24.04 自带的 `ubuntu` 用户被 Dockerfile 显式删除让出 1000；`updateRemoteUserUID` 再按宿主调整 |
+| devuser UID/GID 默认走宿主对齐（见下） | 让宿主创建的文件在容器里归属正确，VS Code 编辑器保存不报权限错 |
 | 不挂 `~/.ssh`、`~/.gitconfig` 等宿主凭据 | 这是 L1 的一部分，避免凭据穿透 |
+
+### devuser UID/GID 对齐：三条路径
+
+**核心问题**：工作区是宿主目录的 bind mount，文件归属由宿主决定（Mac 一般 UID 501、Linux 一般 1000）。如果容器内 devuser 的 UID 与之不一致，VS Code 用 devuser 身份保存 `.claude/settings.json` 等仓库内文件时会撞 `EACCES`。
+
+本仓库提供三条对齐路径，三者**叠加生效**（其中任一成功，问题就解决）：
+
+#### 路径 1（默认，最稳）：`initializeCommand` 放宽文件 mode
+
+`devcontainer.json` 的 `initializeCommand` 在每次 attach 前由**宿主 shell** 执行：
+
+```bash
+chmod -R o+rwX . 2>/dev/null || true
+```
+
+效果：让工作区所有文件对 "others" 也可写、目录可遍历。容器里的 devuser 无论 UID 是多少都能写。
+
+- **优点**：100% 可靠，跟 UID/GID/shell env/VS Code 启动方式全都解耦
+- **代价**：工作区文件 mode 变成 `666`/`777`（你在 `ls -la` 里能看到 `-rw-rw-rw-`）。对单用户开发机不构成问题；多用户共享宿主时需自己评估
+- **是否影响 AI agent 隔离？不**：L3 deny 规则（`Edit(./.claude/settings.json)` 等）独立于文件 mode 生效，**人类放开，AI 仍受限**
+
+如果你不需要这条路径，把 `devcontainer.json` 里的 `initializeCommand` 删掉即可。
+
+#### 路径 2：依赖 `updateRemoteUserUID`
+
+`devcontainer.json` 设 `"updateRemoteUserUID": true`，Dev Containers 扩展会在 attach 时检测宿主用户 UID 并把容器内 devuser 改成同样 UID。在多数 Linux/WSL2 上稳定，但在 macOS Docker Desktop 的 VirtioFS / gRPC FUSE 文件共享层上偶尔不生效。
+
+#### 路径 3：显式 `HOST_UID` / `HOST_GID`（构建期对齐）
+
+`devcontainer.json` 的 build args 配置为读 `${localEnv:HOST_UID:1000}`：
+
+- 如果宿主环境里设置了 `HOST_UID` / `HOST_GID`，镜像构建期 devuser 就直接以该 UID/GID 建立
+- 如果未设置，回落到 1000
+
+**启用步骤**：
+
+```bash
+# 1) 把这两行加到你的 shell profile（~/.zshrc 或 ~/.bashrc）
+export HOST_UID="$(id -u)"
+export HOST_GID="$(id -g)"
+
+# 2) 让当前 shell 立刻生效
+source ~/.zshrc
+
+# 3) 必须**完全退出** VS Code（Cmd+Q）后从该终端启动；GUI 启动不会继承 env var
+code .
+
+# 4) 在 VS Code 里 "Dev Containers: Rebuild Container (Without Cache)"
+```
+
+> **macOS GUI 启动陷阱**：Finder/Dock 启动 VS Code 时不读 shell profile，`HOST_UID` 是空，路径 3 失效。所以建议先把路径 1 留着兜底，再尝试路径 3。
+
+#### 离线构建（路径 3 配套）
+
+`Makefile` 默认就用 `$(shell id -u)` 自动检测：
+
+```bash
+make image           # 自动 UID/GID 对齐
+make print-uid       # 看一下会用的 UID/GID
+make image USER_UID=1000 USER_GID=1000   # 强制覆盖
+```
+
+#### 验证（在容器内 VS Code 终端跑）
+
+```bash
+id                                # 看 devuser 实际 UID
+ls -la .claude/settings.json      # 看文件权限和归属
+echo "" >> .claude/settings.json  # 实测能否写
+```
+
+`echo` 成功就 OK，不用纠结 UID 是不是真的对齐——三条路径只要任一条生效就够。
 
 ### 何时会感到不便
 
@@ -341,12 +422,15 @@ images/
 | `bwrap: setting up uid map: Permission denied`（Ubuntu 24.04+ 宿主） | L2 | 宿主 `kernel.apparmor_restrict_unprivileged_userns=1`。本仓库已通过 ① Dockerfile 给 bwrap 加 setuid，② runArgs 加 `--security-opt=apparmor=unconfined` 规避；若仍失败，宿主侧 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` 验证 |
 | Claude 内置 sandbox `Bubblewrap fails to start inside a container` | L2 | 嵌套 bwrap 无法挂载新 `/proc`。`.claude/settings.json` 的 `sandbox` 块加 `"enableWeakerNestedSandbox": true` |
 | Copilot 仍能读 `.env` | L3（Copilot） | **设计上的预期行为**：Copilot 的 L3 不约束 `readFile` 等内置工具。要防 Copilot 读，唯一可靠手段是 L1（不挂载） |
+| VS Code 编辑器人工保存仓库文件失败、报 `EACCES` / 权限错误 | L1 UID 对齐 | 容器内 devuser 的 UID 与宿主用户 UID 不一致。默认情况下 `devcontainer.json` 的 `initializeCommand` 会 `chmod -R o+rwX .` 自动绕过 UID 问题——如果你删了这条 initializeCommand 或它没运行（旧容器未 Rebuild），就会撞这个错。**修复**：`Dev Containers: Rebuild Container Without Cache`。深入修复见 ["devuser UID/GID 对齐：三条路径"](#devuser-uidgid-对齐三条路径)|
 | `.git` 写操作报 Read-only file system | L4 | 仅在 `CLAUDE_USE_BWRAP=1` 时发生，是 ro-bind-self 拦截。需要写 `.git` 从宿主或非 sandboxed shell 操作 |
 | `claude: command not found` | L1 | 镜像构建未完成。检查容器构建日志 |
 | `claude: WORKSPACE_ROOT is not set` | L4 | shim 在非 devcontainer 环境被调用。在 shell 里手动 `export WORKSPACE_ROOT=$(pwd)` |
 | SELinux 阻止访问 | L1 | Fedora/RHEL/CentOS 的 SELinux。确认 `--security-opt=label=disable` 已配置 |
 
 ### 诊断命令
+
+> 以下命令均**在容器内执行**（VS Code 终端或 `docker exec -it <container> bash`）。在宿主 shell 跑这些是无意义的。
 
 ```bash
 # L1 身份与挂载
@@ -362,8 +446,9 @@ bwrap --die-with-parent --bind / / --true && echo "bwrap OK" || echo "bwrap FAIL
 echo "CLAUDE_USE_BWRAP=${CLAUDE_USE_BWRAP:-(unset, L4 disabled)}"
 
 # Shim / 真二进制布局
-ls -l /usr/local/bin/claude /usr/local/bin/claude-real
-head -1 /usr/local/bin/claude              # 应为 #!/usr/bin/env bash (shim)
+ls -l "$(command -v claude)" "$(command -v claude-real)"
+head -1 "$(command -v claude)"              # 应为 #!/usr/bin/env bash (shim)
+# shim 一般在 /usr/local/bin/claude；claude-real 在 npm prefix 下（通常 /usr/bin/）
 
 # 认证
 echo "ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:+set}"
@@ -376,9 +461,9 @@ echo "ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:+set}"
 shim 与 `claude-real` 在镜像构建期植入，不存在"运行时安装失败"状态。行为异常时：
 
 ```bash
-# 1) 验证二进制布局
-ls -l /usr/local/bin/claude /usr/local/bin/claude-real
-/usr/local/bin/claude-real --version
+# 1) 验证二进制布局（路径由 npm prefix 决定）
+ls -l "$(command -v claude)" "$(command -v claude-real)"
+claude-real --version
 
 # 2) 验证 L2/L4 依赖的 bwrap
 bwrap --die-with-parent --bind / / --true && echo OK

@@ -12,19 +12,21 @@
             "Edit(./.claude/settings.json)"
         ]
     },
-
     "sandbox": {
         "enabled": true,
         "failIfUnavailable": false,
         "autoAllowBashIfSandboxed": true,
-        "allowUnsandboxedCommands": false,
+        "allowUnsandboxedCommands": true,
+        "enableWeakerNestedSandbox": true,
         "filesystem": {
             "denyRead": [
                 "./.env",
+                "./.env.*",
                 "./core/src/**"
             ],
             "denyWrite": [
                 "./.env",
+                "./.env.*",
                 "./core/src/**",
                 "./.git/**",
                 "./.claude/settings.json"

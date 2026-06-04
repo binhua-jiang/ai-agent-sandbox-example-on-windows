@@ -32,9 +32,14 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
-REAL_CLAUDE="/usr/local/bin/claude-real"
-if [[ ! -x "$REAL_CLAUDE" ]]; then
-    echo "claude-wrapper: real claude binary not found at $REAL_CLAUDE" >&2
+# Locate claude-real via PATH. The Dockerfile renames npm's `claude` binary
+# to `claude-real` in the same directory, so wherever npm's prefix is (e.g.
+# /usr/bin on NodeSource Ubuntu, /usr/local/bin on others), claude-real
+# ends up next to it and reachable through PATH.
+REAL_CLAUDE="$(command -v claude-real 2>/dev/null || true)"
+if [[ -z "$REAL_CLAUDE" || ! -x "$REAL_CLAUDE" ]]; then
+    echo "claude-wrapper: claude-real not found in PATH" >&2
+    echo "  PATH=$PATH" >&2
     exit 1
 fi
 

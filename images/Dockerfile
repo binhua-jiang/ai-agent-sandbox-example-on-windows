@@ -54,13 +54,20 @@ RUN mkdir -p /etc/apt/keyrings \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI with version lock for reproducibility.
-# The npm-installed binary is renamed to claude-real; /usr/local/bin/claude
-# becomes a thin shim (installed below) that delegates to the workspace
-# wrapper at runtime. Doing this at build time avoids needing sudo / root
-# during postCreateCommand under the non-root devuser.
+# The npm-installed binary is renamed in place to `claude-real`; the shim
+# below shadows the original `claude` name at /usr/local/bin/claude.
+#
+# Important: NodeSource's nodejs package sets npm prefix to /usr (not
+# /usr/local), so claude lands at /usr/bin/claude. After the rename,
+# claude-real is at /usr/bin/claude-real. The wrapper and setup.sh both
+# discover it via PATH (not by hardcoded path) to keep this robust.
+#
+# Doing the rename at build time (as root) avoids needing sudo during
+# postCreateCommand under the non-root devuser.
 RUN npm install -g @anthropic-ai/claude-code@2.1.161 \
 	&& CLAUDE_BIN="$(command -v claude)" \
-	&& mv "$CLAUDE_BIN" "$(dirname "$CLAUDE_BIN")/claude-real"
+	&& mv "$CLAUDE_BIN" "$(dirname "$CLAUDE_BIN")/claude-real" \
+	&& claude-real --version
 
 # Install the claude shim. It defers to the workspace wrapper so that the
 # bwrap logic (in .devcontainer/claude-wrapper.sh) can be edited without
