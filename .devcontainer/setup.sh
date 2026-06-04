@@ -14,27 +14,47 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_AUTH_TOKEN:-}" && -f "$ENV_
 fi
 
 # ============================================
-# Environment Tests (from post-create.sh)
+# Environment Checks
 # ============================================
+# Runs as the non-root devuser (postCreateCommand honours remoteUser).
+# The wrapper and claude-real are installed at image build time, so no
+# privileged operations are needed here.
 
-echo "Testing claude..."
-if command -v claude >/dev/null 2>&1; then
-    claude --version
-else
-    echo "claude not available"
+echo "Running as: $(id -un) (uid=$(id -u), gid=$(id -g))"
+
+echo "Checking claude shim..."
+if ! command -v claude >/dev/null 2>&1; then
+    echo "claude: not found in PATH; image build is broken." >&2
+    exit 1
 fi
+claude_path="$(command -v claude)"
+if [[ ! -x /usr/local/bin/claude-real ]]; then
+    echo "claude-real not found at /usr/local/bin/claude-real; image build is broken." >&2
+    exit 1
+fi
+echo "  shim:      $claude_path"
+echo "  real bin:  /usr/local/bin/claude-real"
+/usr/local/bin/claude-real --version
 
-echo "Testing bwrap..."
-if command -v bwrap >/dev/null 2>&1; then
-    bwrap --version
-    # Test if bwrap can actually create namespaces
-    if bwrap --die-with-parent --bind / / --true 2>/dev/null; then
-        echo "bwrap namespace test: OK"
-    else
-        echo "bwrap namespace test: FAILED (may need CAP_SYS_ADMIN)"
-    fi
+echo "Checking bwrap..."
+if ! command -v bwrap >/dev/null 2>&1; then
+    echo "bwrap not available; aborting setup." >&2
+    exit 1
+fi
+bwrap --version
+# Verify bwrap can actually create user namespaces in this container.
+# On macOS Docker Desktop / Podman libkrun this often fails even with
+# CAP_SYS_ADMIN; in that case the sandbox is unusable and we hard-fail.
+if bwrap_test_output="$(bwrap --die-with-parent --bind / / --true 2>&1)"; then
+    echo "bwrap namespace test: OK"
 else
-    echo "bwrap not available"
+    echo "bwrap namespace test: FAILED" >&2
+    if [[ -n "$bwrap_test_output" ]]; then
+        echo "   ${bwrap_test_output}" >&2
+    fi
+    echo "   Bubblewrap namespace isolation is required; aborting setup." >&2
+    echo "   On macOS this is a known limitation of the Docker/Podman VM." >&2
+    exit 1
 fi
 
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]] || [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
@@ -50,80 +70,8 @@ else
 fi
 
 # ============================================
-# Workspace Permissions (for non-root user)
-# ============================================
-
-# Ensure workspace directory is writable by the devuser
-if [[ -d "$WORKSPACE_ROOT" ]]; then
-    # The container may have mounted the workspace with root ownership
-    # We need to ensure the devuser can write to it
-    echo "Ensuring workspace permissions for devuser..."
-    # Check if we have sudo or are root (during initial container setup)
-    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-        sudo chown -R "$(id -u):$(id -g)" "$WORKSPACE_ROOT" 2>/dev/null || true
-    elif [[ "$(id -u)" == "0" ]]; then
-        chown -R devuser:devuser "$WORKSPACE_ROOT" 2>/dev/null || true
-    fi
-fi
-
-# ============================================
-# Sandbox Wrapper Setup
-# ============================================
-
-setup_sandbox_wrapper() {
-    local claude_path
-    claude_path="$(command -v claude 2>/dev/null || true)"
-
-    if [[ -z "$claude_path" ]]; then
-        echo "claude binary not found, skip wrapper setup"
-        return 0
-    fi
-
-    local claude_dir="$(dirname "$claude_path")"
-    local claude_real="$claude_dir/claude-real"
-    local wrapper_src="$WORKSPACE_ROOT/.devcontainer/claude-wrapper.sh"
-
-    # Check if already set up
-    if [[ -x "$claude_real" ]]; then
-        echo "Sandbox wrapper already installed"
-        return 0
-    fi
-
-    if [[ ! -f "$wrapper_src" ]]; then
-        echo "Warning: wrapper script not found at $wrapper_src"
-        return 0
-    fi
-
-    # Rename original binary and install wrapper
-    # This may require elevated permissions if installed in system path
-    echo "Installing sandbox wrapper for claude..."
-    if [[ "$(id -u)" == "0" ]] || command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-        if [[ "$(id -u)" == "0" ]]; then
-            mv "$claude_path" "$claude_real"
-            cp "$wrapper_src" "$claude_path"
-            chmod +x "$claude_path"
-        else
-            sudo mv "$claude_path" "$claude_real"
-            sudo cp "$wrapper_src" "$claude_path"
-            sudo chmod +x "$claude_path"
-        fi
-        echo "Sandbox wrapper installed: $claude_path -> claude-real"
-    else
-        echo "Warning: Cannot install wrapper (need root/sudo access)"
-        echo "Claude will run without bubblewrap sandbox (settings.json sandbox still active)"
-    fi
-}
-
-setup_sandbox_wrapper
-
-# ============================================
 # Claude Plugin Bootstrap
 # ============================================
-
-if ! command -v claude >/dev/null 2>&1; then
-    echo "claude not found, skip plugin bootstrap"
-    exit 0
-fi
 
 if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
     echo "No Claude API credential found, skip plugin bootstrap to avoid interactive login"

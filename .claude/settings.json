@@ -5,7 +5,6 @@
             "Read(./.env)",
             "Read(./.env.*)",
             "Read(./core/src/**)",
-            "Read(./.git/**)",
             "Edit(./.env)",
             "Edit(./.env.*)",
             "Edit(./core/src/**)",
@@ -22,13 +21,12 @@
         "filesystem": {
             "denyRead": [
                 "./.env",
-                "./core/src",
-                "./.git"
+                "./core/src/**"
             ],
             "denyWrite": [
                 "./.env",
-                "./core/src",
-                "./.git",
+                "./core/src/**",
+                "./.git/**",
                 "./.claude/settings.json"
             ],
             "allowWrite": [
