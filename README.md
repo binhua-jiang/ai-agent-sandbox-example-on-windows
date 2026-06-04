@@ -21,6 +21,7 @@
   - Linux 宿主：原生支持（绝大多数发行版默认开启）
   - Windows：必须走 WSL2 + Docker/Podman
   - **macOS：Docker Desktop / Podman libkrun 提供的 Linux VM 通常不开放 user namespace，即使加了 `CAP_SYS_ADMIN` 也跑不起来 bwrap**。本仓库的 `setup.sh` 检测到 bwrap 不能创建 namespace 时会直接中止初始化，避免静默降级。详见 [故障排查](#故障排查)。
+  - **Ubuntu 24.04+ 宿主**：宿主默认开启 `kernel.apparmor_restrict_unprivileged_userns=1`，禁止非特权 user namespace。本仓库已在镜像层规避（setuid bwrap）+ 容器层规避（`apparmor=unconfined`），用户**不需要**改宿主配置
 
 ### 步骤
 
@@ -252,6 +253,8 @@ podman info
 |------|----------|----------|
 | `bwrap namespace test: FAILED`（setup 中止） | 容器/VM 不支持 user namespace | Linux 宿主：检查 `sysctl kernel.unprivileged_userns_clone`。Windows：必须用 WSL2 而不是原生 Hyper-V。macOS：Docker Desktop / Podman libkrun 的 VM 通常不支持，没有官方解；可考虑在 Linux 服务器或 Linux 虚拟机里跑此沙箱 |
 | `bwrap: permission denied` | 容器缺少 SYS_ADMIN 能力 | 检查 `devcontainer.json` 的 `runArgs` 包含 `--cap-add=SYS_ADMIN` |
+| `bwrap: setting up uid map: Permission denied` / 无法创建 user namespace（Ubuntu 24.04+ 宿主） | 宿主开启了 `kernel.apparmor_restrict_unprivileged_userns=1`，AppArmor 阻止非特权 userns | 本仓库已通过两层措施规避：① Dockerfile 给 `/usr/bin/bwrap` 加 setuid 位，让 bwrap 以 root 创建 namespace；② `devcontainer.json` runArgs 加 `--security-opt=apparmor=unconfined`。两者任一生效即可。如仍失败，可在宿主侧 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` 临时验证 |
+| Claude 内置 sandbox `Bubblewrap fails to start inside a container` | 非特权容器内嵌套 bwrap 无法挂载新的 `/proc` | 在 `.claude/settings.json` 的 `sandbox` 块里加 `"enableWeakerNestedSandbox": true`，让内层 bwrap 复用容器现有 `/proc` |
 | `claude: command not found` | 镜像构建未完成或损坏 | 检查容器构建日志，确认 `npm install -g @anthropic-ai/claude-code` 与 `COPY .devcontainer/claude-shim.sh` 都成功 |
 | `claude: WORKSPACE_ROOT is not set` | shim 在非 devcontainer 环境下被调用 | 在 shell 里手动 `export WORKSPACE_ROOT=$(pwd)` 再运行 |
 | `claude-wrapper: wrapper not found or not executable` | 工作区里的 `.devcontainer/claude-wrapper.sh` 丢失或权限错乱 | 确认仓库完整、文件有 +x 权限：`chmod +x .devcontainer/claude-wrapper.sh` |

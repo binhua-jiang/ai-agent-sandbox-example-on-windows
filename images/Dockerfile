@@ -4,12 +4,24 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Base tooling for a development sandbox.
 # Install bubblewrap for namespace isolation.
-# NOTE: bwrap requires user namespace support in the host/VM kernel.
-# On macOS (Docker Desktop, Podman/libkrun), user namespaces are often unavailable
-# even with CAP_SYS_ADMIN. In that case setup.sh will hard-fail; see README
-# "macOS 限制" section for details.
-# Do not add file capabilities to bwrap; recent bwrap rejects that configuration
-# with "Unexpected capabilities but not setuid, old file caps config?".
+#
+# About bwrap on Ubuntu 24.04:
+#   The base image's host kernel may enforce
+#   `kernel.apparmor_restrict_unprivileged_userns=1`, which blocks bwrap's
+#   default unprivileged-userns path. We work around this by adding the
+#   setuid root bit to /usr/bin/bwrap (see chmod u+s below): with setuid,
+#   bwrap creates namespaces as root and bypasses the apparmor restriction.
+#
+#   Setuid is bwrap's "legacy mode" and is fully supported. Do NOT confuse
+#   this with adding file capabilities (e.g. `setcap cap_sys_admin+ep`):
+#   recent bwrap explicitly rejects file caps with
+#   "Unexpected capabilities but not setuid, old file caps config?".
+#   The two mechanisms are mutually exclusive.
+#
+#   socat is required by Claude Code's built-in sandbox (it relays network
+#   traffic through the sandbox proxy). Keep it installed even though our
+#   outer wrapper does not use it directly.
+#
 # Also includes C++ build toolchain (gcc + clang).
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
@@ -28,6 +40,7 @@ RUN apt-get update \
 		cmake \
 		make \
 		gdb \
+	&& chmod u+s /usr/bin/bwrap \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Install Node.js (LTS) for CLI tooling distributed via npm.
