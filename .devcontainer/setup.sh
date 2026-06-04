@@ -36,31 +36,25 @@ echo "  shim:      $claude_path"
 echo "  real bin:  /usr/local/bin/claude-real"
 /usr/local/bin/claude-real --version
 
-echo "Checking bwrap..."
-# Setup never hard-fails on bwrap problems: the dev container must remain
-# usable for general development even when bwrap isolation is unavailable
-# (typical on macOS Docker Desktop / Podman libkrun, where the Linux VM
-# does not expose user namespaces). The claude wrapper itself will detect
-# the same condition at invocation time and either degrade with a loud
-# warning, or hard-fail when CLAUDE_SANDBOX_STRICT=1.
+echo "Checking bwrap (used by Claude's built-in Bash sandbox, and optionally by the outer wrapper)..."
+# bwrap status is informational only. It is used by:
+#   1) Claude Code's built-in sandbox to isolate Bash subprocesses
+#      (configured in .claude/settings.json under "sandbox"). This is the
+#      default protection and does not require any opt-in.
+#   2) Our outer wrapper, but ONLY when the user sets CLAUDE_USE_BWRAP=1
+#      in .env. The outer wrapper is OFF by default so the devcontainer
+#      works uniformly on macOS / Linux / WSL2.
 if ! command -v bwrap >/dev/null 2>&1; then
-    echo "WARNING: bwrap not installed; sandbox layer 1 (namespace isolation) will be UNAVAILABLE." >&2
-    echo "   Claude will run with only settings.json permission rules (bypassable)." >&2
-    echo "   To enforce strict mode and refuse to run, set CLAUDE_SANDBOX_STRICT=1 in .env" >&2
+    echo "  bwrap: NOT installed (image build issue)" >&2
+elif bwrap_test_output="$(bwrap --die-with-parent --bind / / --true 2>&1)"; then
+    echo "  bwrap: available. Set CLAUDE_USE_BWRAP=1 in .env to also enable the outer sandbox layer."
 else
-    bwrap --version
-    if bwrap_test_output="$(bwrap --die-with-parent --bind / / --true 2>&1)"; then
-        echo "bwrap namespace test: OK"
-    else
-        echo "WARNING: bwrap namespace test FAILED" >&2
-        if [[ -n "$bwrap_test_output" ]]; then
-            echo "   ${bwrap_test_output}" >&2
-        fi
-        echo "   This VM does not allow bwrap to create user namespaces" >&2
-        echo "   (common on macOS Docker Desktop / Podman libkrun)." >&2
-        echo "   Sandbox layer 1 (namespace isolation) will be UNAVAILABLE;" >&2
-        echo "   Claude will run with only settings.json permission rules (bypassable)." >&2
-        echo "   To enforce strict mode and refuse to run, set CLAUDE_SANDBOX_STRICT=1 in .env" >&2
+    echo "  bwrap: installed but cannot create user namespaces in this VM"
+    echo "         (common on macOS Docker Desktop / Podman libkrun)."
+    echo "         Claude's built-in Bash sandbox may also be limited."
+    echo "         Do NOT set CLAUDE_USE_BWRAP=1 in this environment."
+    if [[ -n "$bwrap_test_output" ]]; then
+        echo "         Test output: ${bwrap_test_output}"
     fi
 fi
 

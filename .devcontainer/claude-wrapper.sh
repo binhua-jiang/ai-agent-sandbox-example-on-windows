@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
-# Claude Code CLI wrapper with sandbox isolation.
-# Invoked by the shim at /usr/local/bin/claude. WORKSPACE_ROOT is set by
-# devcontainer.json's containerEnv and validated by the shim.
+# Claude Code CLI wrapper.
+#
+# Default behaviour (CLAUDE_USE_BWRAP unset or 0): pass through to the real
+# claude binary. Container layer + Claude's built-in sandbox + the deny
+# rules in .claude/settings.json are the standard isolation.
+#
+# Opt-in behaviour (CLAUDE_USE_BWRAP=1): wrap the entire claude process in
+# bubblewrap as an extra kernel-level isolation layer (tmpfs / ro-bind /
+# ro-bind-self per .devcontainer/bwrap-policy.conf). This defends against
+# MCP tools or other in-process file accesses that bypass Claude's
+# permission rules. Linux/WSL2 only. If bwrap is requested but cannot
+# create user namespaces, the wrapper hard-fails rather than degrading.
 
 set -euo pipefail
 
@@ -12,70 +21,43 @@ fi
 
 ENV_FILE="$WORKSPACE_ROOT/.env"
 
-# Load workspace credentials if not already in env. The wrapper itself
-# reads .env via bash before bwrap takes over, so this is unaffected by
-# the /dev/null bind that hides .env from the sandboxed claude process.
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_AUTH_TOKEN:-}" && -f "$ENV_FILE" ]]; then
+# Source workspace .env so values like ANTHROPIC_AUTH_TOKEN and
+# CLAUDE_USE_BWRAP are picked up even when the wrapper is invoked from a
+# shell that inherited a stale env. devcontainer.json's --env-file already
+# loads these at container start; this is the belt-and-suspenders pass.
+if [[ -f "$ENV_FILE" ]]; then
     set -a
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
 fi
 
-# claude-real is placed at /usr/local/bin/claude-real by the image build.
 REAL_CLAUDE="/usr/local/bin/claude-real"
 if [[ ! -x "$REAL_CLAUDE" ]]; then
     echo "claude-wrapper: real claude binary not found at $REAL_CLAUDE" >&2
     exit 1
 fi
 
-# Bwrap availability check.
-# Default behaviour: degrade with a loud, repeated warning when bwrap cannot
-# create user namespaces (common on macOS Docker Desktop / Podman libkrun).
-# This keeps the dev container usable across platforms.
-# Strict mode: when CLAUDE_SANDBOX_STRICT=1, refuse to run if bwrap is not
-# fully functional. Intended for deployments that require namespace isolation
-# as a security gate.
-BWRAP_OK=false
-BWRAP_FAIL_REASON=""
-if ! command -v bwrap >/dev/null 2>&1; then
-    BWRAP_FAIL_REASON="bwrap binary not installed in the image"
-elif ! bwrap --die-with-parent --bind / / --true 2>/dev/null; then
-    BWRAP_FAIL_REASON="bwrap cannot create user namespaces in this VM (no userns support)"
-else
-    BWRAP_OK=true
+# Default path: no outer bwrap layer. Container + Claude's built-in
+# sandbox + application-layer deny rules are the standard protection.
+if [[ "${CLAUDE_USE_BWRAP:-0}" != "1" ]]; then
+    exec "$REAL_CLAUDE" "$@"
 fi
 
-if [[ "$BWRAP_OK" == "false" ]]; then
-    if [[ "${CLAUDE_SANDBOX_STRICT:-0}" == "1" ]]; then
-        echo "claude-wrapper: CLAUDE_SANDBOX_STRICT=1 set and bwrap unavailable." >&2
-        echo "  Reason: $BWRAP_FAIL_REASON" >&2
-        echo "  Refusing to run." >&2
-        exit 1
-    fi
-    # Degraded mode: warn loudly on every invocation, log to file, then
-    # exec the real claude without bwrap. Application-level deny rules in
-    # .claude/settings.json are still in effect, but are bypassable.
-    cat >&2 <<EOF
-================================================================================
-  WARNING: bwrap sandbox UNAVAILABLE — running with REDUCED isolation.
-  Reason: $BWRAP_FAIL_REASON
-  Disabled protections:
-    - bubblewrap namespace isolation
-    - core/src tmpfs hiding
-    - .env / .env.* /dev/null masking
-    - .git ro-bind-self write protection
-  Still active:
-    - .claude/settings.json permission rules (BYPASSABLE)
-    - Container-level filesystem boundary (host paths not mounted)
-  To enforce strict mode and refuse to run instead of degrading,
-  set CLAUDE_SANDBOX_STRICT=1 in your shell or .env file.
-================================================================================
-EOF
-    mkdir -p "$WORKSPACE_ROOT/.claude" 2>/dev/null || true
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] claude invoked in degraded mode: $BWRAP_FAIL_REASON" \
-        >> "$WORKSPACE_ROOT/.claude/sandbox.log" 2>/dev/null || true
-    exec "$REAL_CLAUDE" "$@"
+# ----- From here on: CLAUDE_USE_BWRAP=1 was set explicitly. -----
+# We must successfully wrap claude in bwrap, or hard-fail. No silent
+# fallback: the user opted in expecting a real isolation layer.
+
+if ! command -v bwrap >/dev/null 2>&1; then
+    echo "claude-wrapper: CLAUDE_USE_BWRAP=1 but bwrap is not installed." >&2
+    exit 1
+fi
+if ! bwrap --die-with-parent --bind / / --true 2>/dev/null; then
+    echo "claude-wrapper: CLAUDE_USE_BWRAP=1 but bwrap cannot create user namespaces." >&2
+    echo "  Likely cause: VM/host kernel lacks userns support (common on macOS" >&2
+    echo "  Docker Desktop / Podman libkrun). Either unset CLAUDE_USE_BWRAP or" >&2
+    echo "  run this devcontainer on Linux/WSL2." >&2
+    exit 1
 fi
 
 # Load bubblewrap policy from a simple config file.
