@@ -3,3 +3,4 @@
 !.env.example
 .claude/settings.local.json
 build/
+.DS_Store
